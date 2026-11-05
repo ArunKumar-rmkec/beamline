@@ -54,6 +54,21 @@ export function nearestSnap(angle: number, step = SNAP_STEP_RADIANS): number {
   return Math.round(angle / step) * step;
 }
 
+/**
+ * Compute the next snapped angle given a step count (e.g. 1, -1) or degrees (e.g. 15, -15).
+ * Ensures positive rotates positive.
+ */
+export function angleFromStepsOrDegrees(
+  committed: number,
+  stepsOrDegrees: number,
+): number {
+  const steps =
+    Math.abs(stepsOrDegrees) >= 15
+      ? Math.round(stepsOrDegrees / 15)
+      : Math.trunc(stepsOrDegrees);
+  return wrapPi(committed + steps * SNAP_STEP_RADIANS);
+}
+
 /** Signed rotation of `to` relative to `from`, projected onto `axis`. */
 export function signedTwist(from: Quat, to: Quat, axis: Vec3): number {
   const invX = -from.x;

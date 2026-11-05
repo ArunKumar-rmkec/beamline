@@ -79,3 +79,22 @@ test('levels 3 and 6 buttons never overlap any level geometry', async () => {
     }
   }
 });
+
+test('tutorial panel sits strictly above the top edge of the board grid', () => {
+  const TUTORIAL_CARD_Y = BOARD_HEIGHT / 2 + 0.058;
+  const TUTORIAL_CARD_HEIGHT = 0.085;
+  const TUTORIAL_BTN_Y = BOARD_HEIGHT / 2 + 0.038;
+  const TUTORIAL_BTN_HEIGHT = 0.025;
+
+  const cardBottomEdge = TUTORIAL_CARD_Y - TUTORIAL_CARD_HEIGHT / 2;
+  const btnBottomEdge = TUTORIAL_BTN_Y - TUTORIAL_BTN_HEIGHT / 2;
+
+  assert.ok(
+    cardBottomEdge >= BOARD_HEIGHT / 2,
+    `tutorial card bottom (${cardBottomEdge.toFixed(3)}) should be above board top (${(BOARD_HEIGHT / 2).toFixed(3)})`,
+  );
+  assert.ok(
+    btnBottomEdge >= BOARD_HEIGHT / 2,
+    `tutorial button bottom (${btnBottomEdge.toFixed(3)}) should be above board top (${(BOARD_HEIGHT / 2).toFixed(3)})`,
+  );
+});

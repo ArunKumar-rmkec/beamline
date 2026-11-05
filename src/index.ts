@@ -12,7 +12,18 @@ if (!(container instanceof HTMLDivElement)) {
 // Enter XR control; if that cannot start a session, the board stays on screen.
 hideIwerOfferChrome();
 
-World.create(container, projectOptions)
+World.create(container, {
+  ...projectOptions,
+  features: {
+    ...projectOptions.features,
+    locomotion: false,
+    physics: false,
+    sceneUnderstanding: false,
+    environmentRaycast: false,
+    spatialUI: false,
+    grabbing: true,
+  },
+})
   .then(async (world) => {
     world.registerSystem(BoardSystem, { priority: 1 });
     await installDesktopXRChrome(world);

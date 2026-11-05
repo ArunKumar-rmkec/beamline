@@ -4,6 +4,20 @@ A seated mixed-reality laser puzzle for the Meta Quest Browser. Pinch a mirror o
 
 Hands only. Controllers are not used. The emulator starts in hands mode. The board sits centered, about 40cm in front of your eyes and 15cm below them, tilted like a tray table so the whole board, including **Center** and **Hand**, stays in view. There are no spatial anchors. **Center** on the near edge puts it back in front of you. **Hand** on that same edge turns the Hand Mirror prototype on. Progress is saved in `localStorage` under the `beamline:` prefix. `beamline:progress` is `{ v: 1, level, angles }` with a 1-based level, written on every level change and rotation.
 
+## Play
+
+Live WebXR build: [https://arunkumar-rmkec.github.io/beamline/](https://arunkumar-rmkec.github.io/beamline/)
+
+![Beamline screenshot](docs/screenshot.png)
+
+### Controls (Hands-only, Seated)
+
+- **Poke**: Push buttons with your index finger.
+- **Pinch to Grab**: Pinch a mirror or prism with thumb and index finger to grab it.
+- **Twist to Rotate**: Twist your wrist or circle your fingertip around the piece to rotate in 15° steps.
+- **Center**: Poke the **Center** button on the near edge to re-center the board in front of you.
+- **Hand**: Poke the **Hand** button to toggle the open-palm reflection prototype.
+
 ## Requirements
 
 - Node.js 20.19+ or 22.12+ (see `engines` in `package.json`)
@@ -46,7 +60,7 @@ The repository owner has to set **Settings → Pages → Build and deployment �
 Add `?test=1` to the page URL. The build then sets `window.beamline`. Without that query the object is absent.
 
 ```js
-beamline.state()                 // level (1–6), paused, won, lit[], grabbed, pieces[]
+beamline.state()                 // level (1–6), paused, won, lit[], grabbed, ui, presses, pieces[], pose
 beamline.grab('mirror-2-2')      // or grab('0') for the first movable piece
 beamline.rotate(1)               // one 15° step on the grabbed piece
 beamline.rotate('mirror-2-2', 3) // 3 steps × 15° on that piece
@@ -54,9 +68,11 @@ beamline.release()
 beamline.level(4)                // levels are 1–6, loaded at their starting angles
 beamline.pause()
 beamline.resume()
+beamline.resetTutorial()         // clears tutorial key and shows the 3-step tutorial cards again
+beamline.press('next')           // simulates a poke on a button: center, hand, next, resume, restart
 ```
 
-A piece id is `type-column-row`, for example `prism-2-2`. `state().pose` is head-relative: hands and movable pieces, in meters.
+A piece id is `type-column-row`, for example `prism-2-2`. `state().pose` is head-relative: hands and movable pieces, in meters. `state().pose.buttons` provides world-space coordinates for all poke buttons (`center`, `hand`, `tutorial`, `resume`, `restart`). `state().ui` reports `{ tutorial: { visible, step }, pausedPanel, endPanel }`.
 
 Keys in this mode only: **Q** and **E** turn the selected piece one step, **Tab** selects the next piece (Shift+Tab the previous), **N** loads the next level. A win stays on the current level until **N** or `level()`.
 

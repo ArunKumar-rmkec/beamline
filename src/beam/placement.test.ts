@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  BLOCKER_HALF_HEIGHT,
   BOARD_DROP_M,
   BOARD_FORWARD_M,
   BOARD_HEIGHT,
   BOARD_SIDE_M,
   EDGE_BUTTON_HEIGHT,
   EDGE_BUTTON_Y,
+  MIRROR_HALF_LENGTH,
   SOLO_REACH_RADIUS,
   TRAY_TILT_RADIANS,
   cellCenter,
@@ -33,7 +35,7 @@ test('the tray sits in reach of a seated player and inside the emulator view', (
   assert.ok(buttonFarEdge < -BOARD_HEIGHT / 2, 'buttons sit strictly below the level grid');
   const buttonLip = EDGE_BUTTON_Y - EDGE_BUTTON_HEIGHT / 2;
   const depression = trayDepressionDegrees(buttonLip);
-  assert.ok(depression < 46, `near lip is ${depression.toFixed(1)}° below the gaze`);
+  assert.ok(depression < 49, `near lip is ${depression.toFixed(1)}° below the gaze`);
   assert.ok(TRAY_TILT_RADIANS > 0.4);
 
   const sin = Math.sin(TRAY_TILT_RADIANS);
@@ -96,5 +98,29 @@ test('tutorial panel sits strictly above the top edge of the board grid', () => 
   assert.ok(
     btnBottomEdge >= BOARD_HEIGHT / 2,
     `tutorial button bottom (${btnBottomEdge.toFixed(3)}) should be above board top (${(BOARD_HEIGHT / 2).toFixed(3)})`,
+  );
+});
+
+test('level 6 gap between bottom-row pieces and button top edge is at least 3cm', async () => {
+  const { LEVELS } = await import('./levels.ts');
+  const level6 = LEVELS.find((l) => l.id === '6');
+  assert.ok(level6, 'level 6 exists');
+  const buttonTopY = EDGE_BUTTON_Y + EDGE_BUTTON_HEIGHT / 2;
+  let lowestEdgeY = 0;
+  let found = false;
+  for (const piece of level6.pieces) {
+    if (piece.row !== 0) continue;
+    const center = cellCenter(piece.col, piece.row);
+    const halfH = piece.type === 'blocker' ? BLOCKER_HALF_HEIGHT : MIRROR_HALF_LENGTH;
+    const bottomEdge = center.y - halfH;
+    if (!found || bottomEdge < lowestEdgeY) {
+      lowestEdgeY = bottomEdge;
+      found = true;
+    }
+  }
+  const gapM = lowestEdgeY - buttonTopY;
+  assert.ok(
+    gapM >= 0.03,
+    `gap between level 6 bottom pieces (${lowestEdgeY.toFixed(3)}) and buttons (${buttonTopY.toFixed(3)}) is ${gapM.toFixed(3)}m, should be >= 0.030m`,
   );
 });

@@ -66,6 +66,7 @@ import {
   SNAP_STEP_RADIANS,
   angleFromStepsOrDegrees,
   chooseTwistDelta,
+  nearestSnap,
   signedTwist,
   smoothAngle,
   snapWithHysteresis,
@@ -483,6 +484,7 @@ export class BoardSystem extends createSystem({
           this.save();
         }
         if (state === VisibilityState.Visible) {
+          this.endTwist();
           this.world.scene.background = null;
           this.audio.resume();
           this.checkFirstRunTutorial();
@@ -497,18 +499,20 @@ export class BoardSystem extends createSystem({
     this.installTestHook();
   }
 
-  private recenter(): void {
+  private recenter(bypassDebounce = false): void {
+    if (this.tutorialVisible) return;
     const now = performance.now();
-    if (now - this.lastCenterPress < BUTTON_DEBOUNCE_MS) return;
+    if (!bypassDebounce && now - this.lastCenterPress < BUTTON_DEBOUNCE_MS) return;
     this.lastCenterPress = now;
     this.centerPresses += 1;
     this.audio.interact();
     this.needsPlace = true;
   }
 
-  private toggleHandMirror(): void {
+  private toggleHandMirror(bypassDebounce = false): void {
+    if (this.tutorialVisible) return;
     const now = performance.now();
-    if (now - this.lastHandPress < BUTTON_DEBOUNCE_MS) return;
+    if (!bypassDebounce && now - this.lastHandPress < BUTTON_DEBOUNCE_MS) return;
     this.lastHandPress = now;
     this.handPresses += 1;
     this.audio.interact();
@@ -531,10 +535,10 @@ export class BoardSystem extends createSystem({
     }
   }
 
-  private advanceTutorial(): void {
+  private advanceTutorial(bypassDebounce = false): void {
     if (!this.tutorialVisible) return;
     const now = performance.now();
-    if (now - this.lastTutorialPress < BUTTON_DEBOUNCE_MS) return;
+    if (!bypassDebounce && now - this.lastTutorialPress < BUTTON_DEBOUNCE_MS) return;
     this.lastTutorialPress = now;
     this.tutorialPresses += 1;
     this.audio.interact();
@@ -566,9 +570,10 @@ export class BoardSystem extends createSystem({
     this.tutorialButtonMaterial.needsUpdate = true;
   }
 
-  private resumeFromPanel(): void {
+  private resumeFromPanel(bypassDebounce = false): void {
+    if (this.tutorialVisible) return;
     const now = performance.now();
-    if (now - this.lastResumePress < BUTTON_DEBOUNCE_MS) return;
+    if (!bypassDebounce && now - this.lastResumePress < BUTTON_DEBOUNCE_MS) return;
     this.lastResumePress = now;
     this.resumePresses += 1;
     this.audio.interact();
@@ -576,9 +581,10 @@ export class BoardSystem extends createSystem({
     this.applyPause();
   }
 
-  private restartGame(): void {
+  private restartGame(bypassDebounce = false): void {
+    if (this.tutorialVisible) return;
     const now = performance.now();
-    if (now - this.lastRestartPress < BUTTON_DEBOUNCE_MS) return;
+    if (!bypassDebounce && now - this.lastRestartPress < BUTTON_DEBOUNCE_MS) return;
     this.lastRestartPress = now;
     this.restartPresses += 1;
     this.audio.interact();
@@ -591,7 +597,7 @@ export class BoardSystem extends createSystem({
   update(delta: number): void {
     if (this.needsPlace) this.placeWhenReady();
     this.applyPause();
-    if (!this.paused) {
+    if (!this.paused && !this.needsPlace) {
       this.integrateTwist(delta);
       this.integrateHand();
       this.integrateWin(delta);
@@ -1126,6 +1132,15 @@ export class BoardSystem extends createSystem({
   }
 
   private endTwist(): void {
+    if (this.active) {
+      const snapped = nearestSnap(this.active.smoothed);
+      if (snapped !== this.active.committed) {
+        this.active.committed = snapped;
+        this.audio.tick();
+        this.syncBeam();
+      }
+      this.save();
+    }
     this.twisting = false;
     this.tipReady = false;
     this.active = null;
@@ -1367,7 +1382,7 @@ export class BoardSystem extends createSystem({
   }
 
   private integrateWin(delta: number): void {
-    if (!this.won) return;
+    if (!this.won || this.tutorialVisible) return;
     this.stepSparks(delta);
     if (this.levelIndex >= LEVELS.length - 1 || this.testMode) return;
     // A long first frame must not skip the payoff.
@@ -1554,6 +1569,10 @@ export class BoardSystem extends createSystem({
     } else if (event.code === 'KeyN') {
       event.preventDefault();
       event.stopPropagation();
+      if (this.tutorialVisible) {
+        this.advanceTutorial(true);
+        return;
+      }
       if (this.levelIndex < LEVELS.length - 1) this.hookLevel(this.levelIndex + 2);
     }
   }
@@ -1581,7 +1600,9 @@ export class BoardSystem extends createSystem({
   private hookLevel(n: number): void {
     if (!Number.isInteger(n) || n < 1 || n > LEVELS.length) return;
     this.hookPaused = false;
-    this.loadLevel(n - 1, null);
+    const saved = readProgress(localStorage, LEVELS.length);
+    const angles = saved?.level === n - 1 ? saved.angles : null;
+    this.loadLevel(n - 1, angles);
     this.applyPause();
   }
 
@@ -1621,6 +1642,7 @@ export class BoardSystem extends createSystem({
     this.pinchHeldPiece = null;
     this.pinchHand = null;
     this.endTwist();
+    this.save();
   }
 
   private pieceById(id: string): LivePiece | null {
@@ -1661,30 +1683,58 @@ export class BoardSystem extends createSystem({
   private hookPress(button: string): boolean {
     const key = button.toLowerCase();
     if (key === 'center' || key === 'recenter') {
-      this.recenter();
+      this.recenter(true);
       return true;
     }
     if (key === 'hand') {
-      this.toggleHandMirror();
+      this.toggleHandMirror(true);
       return true;
     }
     if (key === 'tutorial' || key === 'next' || key === 'gotit' || key === 'got it') {
-      this.advanceTutorial();
+      this.advanceTutorial(true);
       return true;
     }
     if (key === 'resume') {
-      this.resumeFromPanel();
+      this.resumeFromPanel(true);
       return true;
     }
     if (key === 'restart') {
-      this.restartGame();
+      this.restartGame(true);
       return true;
     }
     return false;
   }
 
+  private getBottomPieceEdgeY(): number {
+    let lowest = 0;
+    let found = false;
+    for (const piece of this.pieces) {
+      if (piece.row !== 0) continue;
+      const center = cellCenter(piece.col, piece.row);
+      let halfH = 0;
+      if (piece.type === 'blocker') {
+        halfH = BLOCKER_HALF_HEIGHT;
+      } else if (piece.type === 'mirror') {
+        const cos = Math.abs(Math.cos(piece.committed));
+        const sin = Math.abs(Math.sin(piece.committed));
+        halfH = MIRROR_HALF_LENGTH * sin + 0.005 * cos;
+      } else if (piece.type === 'prism') {
+        halfH = 0.03;
+      }
+      const bottom = center.y - halfH;
+      if (!found || bottom < lowest) {
+        lowest = bottom;
+        found = true;
+      }
+    }
+    return found ? roundMm(lowest) : roundMm(-BOARD_HEIGHT / 2);
+  }
+
   private hookState() {
     const held = this.grabbedPiece() ?? this.pinchHeldPiece ?? this.hookHeld;
+    const bottomPieceEdgeY = this.getBottomPieceEdgeY();
+    const buttonTopY = roundMm(EDGE_BUTTON_Y + EDGE_BUTTON_HEIGHT / 2);
+    const gapM = roundMm(bottomPieceEdgeY - buttonTopY);
     return {
       level: this.levelIndex + 1,
       paused: this.paused,
@@ -1694,6 +1744,11 @@ export class BoardSystem extends createSystem({
       handMirror: {
         enabled: this.handEnabled,
         visible: this.handDisc.visible,
+      },
+      layout: {
+        bottomPieceEdgeY,
+        buttonTopY,
+        gapM,
       },
       ui: {
         tutorial: {

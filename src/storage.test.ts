@@ -129,3 +129,11 @@ test('tutorial state round-trips and clears under beamline:tutorial', () => {
   assert.equal(store.values.has(TUTORIAL_KEY), false);
   assert.equal(readTutorialDone(store), false);
 });
+
+test('saving rotation progress on level 6 preserves updated angles on re-read', () => {
+  const store = memoryStore();
+  writeProgress(store, { level: 5, angles: [45, 45, 45] });
+  const read = readProgress(store, 6);
+  assert.equal(read?.level, 5);
+  assert.deepEqual(read?.angles, [45, 45, 45]);
+});

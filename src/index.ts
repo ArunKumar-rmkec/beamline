@@ -153,9 +153,21 @@ function iwerEnterButton(): HTMLButtonElement | null {
 }
 
 function hideIwerOfferChrome(): void {
-  const button = iwerEnterButton();
-  const root = button?.getRootNode();
-  if (root instanceof ShadowRoot && root.host instanceof HTMLElement) {
-    root.host.hidden = true;
-  }
+  const hide = (): boolean => {
+    const button = iwerEnterButton();
+    if (!button) return false;
+    const root = button.getRootNode();
+    const host = root instanceof ShadowRoot ? root.host : button;
+    if (host instanceof HTMLElement) {
+      host.style.setProperty('display', 'none', 'important');
+    }
+    return true;
+  };
+  const observer = new MutationObserver(() => {
+    hide();
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  const timer = window.setInterval(() => {
+    if (hide()) window.clearInterval(timer);
+  }, 200);
 }

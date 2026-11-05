@@ -448,6 +448,8 @@ export class BoardSystem extends createSystem({
   private readonly local = new Vector3();
   private readonly palmNormal = new Vector3();
   private readonly scratchQuat = new Quaternion();
+  private readonly pressButtonPos = new Vector3();
+  private readonly pressHandPos = new Vector3();
   private readonly previewBackground = new Color(0x1c2836);
   private readonly basis = new Matrix4();
   private readonly inverse = new Matrix4();
@@ -461,18 +463,23 @@ export class BoardSystem extends createSystem({
     this.loadLevel(this.levelIndex, saved?.angles ?? null);
     this.cleanupFuncs.push(
       this.queries.recenterPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.recenterMesh)) return;
         this.recenter();
       }),
       this.queries.handPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.handMesh)) return;
         this.toggleHandMirror();
       }),
       this.queries.tutorialPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.tutorialButtonMesh)) return;
         this.advanceTutorial();
       }),
       this.queries.resumePressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.resumeButtonMesh)) return;
         this.resumeFromPanel();
       }),
       this.queries.restartPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.restartButtonMesh)) return;
         this.restartGame();
       }),
     );
@@ -878,7 +885,10 @@ export class BoardSystem extends createSystem({
     );
     recenter.name = 'recenter';
     recenter.position.set(-0.07, EDGE_BUTTON_Y, 0.012);
-    recenter.addEventListener('pointerdown', () => this.recenter());
+    recenter.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.recenter();
+    });
     this.recenterMesh = recenter;
     const recenterEntity = this.world.createTransformEntity(recenter, {
       parent: this.boardEntity,
@@ -893,7 +903,10 @@ export class BoardSystem extends createSystem({
     const hand = new Mesh(buttonGeometry, this.handMaterial);
     hand.name = 'hand-mirror';
     hand.position.set(0.07, EDGE_BUTTON_Y, 0.012);
-    hand.addEventListener('pointerdown', () => this.toggleHandMirror());
+    hand.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.toggleHandMirror();
+    });
     this.handMesh = hand;
     const handEntity = this.world.createTransformEntity(hand, { parent: this.boardEntity });
     handEntity.addComponent(PokeInteractable);
@@ -909,7 +922,6 @@ export class BoardSystem extends createSystem({
     tutorialBtn.name = 'tutorial-button';
     tutorialBtn.position.set(0, BOARD_HEIGHT / 2 + 0.038, 0.026);
     tutorialBtn.visible = false;
-    tutorialBtn.addEventListener('pointerdown', () => this.advanceTutorial());
     this.tutorialButtonMesh = tutorialBtn;
     const tutorialEntity = this.world.createTransformEntity(tutorialBtn, {
       parent: this.boardEntity,
@@ -928,7 +940,10 @@ export class BoardSystem extends createSystem({
     resumeBtn.name = 'resume-button';
     resumeBtn.position.set(0, -0.024, 0.065);
     resumeBtn.visible = false;
-    resumeBtn.addEventListener('pointerdown', () => this.resumeFromPanel());
+    resumeBtn.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.resumeFromPanel();
+    });
     this.resumeButtonMesh = resumeBtn;
     const resumeEntity = this.world.createTransformEntity(resumeBtn, {
       parent: this.boardEntity,
@@ -947,7 +962,10 @@ export class BoardSystem extends createSystem({
     restartBtn.name = 'restart-button';
     restartBtn.position.set(0, -0.024, 0.065);
     restartBtn.visible = false;
-    restartBtn.addEventListener('pointerdown', () => this.restartGame());
+    restartBtn.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.restartGame();
+    });
     this.restartButtonMesh = restartBtn;
     const restartEntity = this.world.createTransformEntity(restartBtn, {
       parent: this.boardEntity,
@@ -1700,25 +1718,24 @@ export class BoardSystem extends createSystem({
     ) {
       return;
     }
+    if (
+      event.code !== 'KeyQ' &&
+      event.code !== 'KeyE' &&
+      event.code !== 'Tab' &&
+      event.code !== 'KeyN'
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (!this.inputSettled || this.tutorialVisible) return;
     if (event.code === 'KeyQ') {
-      event.preventDefault();
-      event.stopPropagation();
       this.hookRotateHeld(-1);
     } else if (event.code === 'KeyE') {
-      event.preventDefault();
-      event.stopPropagation();
       this.hookRotateHeld(1);
     } else if (event.code === 'Tab') {
-      event.preventDefault();
-      event.stopPropagation();
       this.hookCycle(event.shiftKey ? -1 : 1);
     } else if (event.code === 'KeyN') {
-      event.preventDefault();
-      event.stopPropagation();
-      if (this.tutorialVisible) {
-        this.advanceTutorial(true);
-        return;
-      }
       if (this.levelIndex < LEVELS.length - 1) this.hookLevel(this.levelIndex + 2);
     }
   }
@@ -1799,6 +1816,94 @@ export class BoardSystem extends createSystem({
       return movable[Number(id)] ?? null;
     }
     return null;
+  }
+
+  private isPressNearButton(button: Object3D | null): boolean {
+    if (!button || !button.visible) return false;
+    button.updateWorldMatrix(true, false);
+    this.pressButtonPos.setFromMatrixPosition(button.matrixWorld);
+
+    let hasFingertip = false;
+    const session = this.xrManager?.getSession?.();
+    const frame = this.xrManager?.getFrame?.() ?? (this as any).xrFrame;
+    const refSpace = this.xrManager?.getReferenceSpace?.();
+
+    if (frame && refSpace && session?.inputSources) {
+      for (const source of session.inputSources) {
+        if ((source as any).hand) {
+          const hand = (source as any).hand;
+          let joint: any;
+          if (typeof hand.get === 'function') {
+            joint = hand.get('index-finger-tip');
+          } else if (Symbol.iterator in Object(hand)) {
+            for (const j of hand) {
+              if (j?.jointName === 'index-finger-tip') {
+                joint = j;
+                break;
+              }
+            }
+          }
+          if (joint) {
+            const pose =
+              typeof frame.getJointPose === 'function'
+                ? frame.getJointPose(joint, refSpace)
+                : typeof frame.getPose === 'function'
+                  ? frame.getPose(joint, refSpace)
+                  : null;
+            if (pose) {
+              hasFingertip = true;
+              this.player.updateWorldMatrix(true, false);
+              this.pressHandPos
+                .set(
+                  pose.transform.position.x,
+                  pose.transform.position.y,
+                  pose.transform.position.z,
+                )
+                .applyMatrix4(this.player.matrixWorld);
+              if (this.pressHandPos.distanceTo(this.pressButtonPos) <= 0.04) {
+                return true;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (!hasFingertip) {
+      for (const hand of ['left', 'right'] as const) {
+        const isHand = this.input?.xr?.isPrimary
+          ? this.input.xr.isPrimary('hand', hand)
+          : Boolean(this.player.indexTipSpaces?.[hand]);
+        if (isHand) {
+          const tip = this.player.indexTipSpaces?.[hand];
+          if (tip) {
+            hasFingertip = true;
+            tip.updateWorldMatrix(true, false);
+            this.pressHandPos.setFromMatrixPosition(tip.matrixWorld);
+            if (this.pressHandPos.distanceTo(this.pressButtonPos) <= 0.04) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    if (hasFingertip) {
+      return false;
+    }
+
+    for (const hand of ['left', 'right'] as const) {
+      const grip = this.player.gripSpaces?.[hand];
+      if (grip) {
+        grip.updateWorldMatrix(true, false);
+        this.pressHandPos.setFromMatrixPosition(grip.matrixWorld);
+        if (this.pressHandPos.distanceTo(this.pressButtonPos) <= 0.15) {
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   private worldPoint(object: Object3D | null): { x: number; y: number; z: number } {

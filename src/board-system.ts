@@ -102,6 +102,9 @@ const HAND_RADIUS = 0.03;
 const TRACKING_JUMP = (40 * Math.PI) / 180;
 const TIP_DEAD_ZONE = 0.025;
 const BUTTON_DEBOUNCE_MS = 250;
+const BUTTON_SETTLE_DISTANCE = 0.06;
+const SETTLE_HOLD_TIME = 0.5;
+const SETTLE_TIMEOUT = 1.0;
 
 const beamGeometry = new BoxGeometry(1, 1, 1);
 const beamMaterial = new MeshBasicMaterial({ color: 0xfff4f6 });
@@ -384,6 +387,9 @@ export class BoardSystem extends createSystem({
   private docHidden = false;
   private xrState: VisibilityState = VisibilityState.NonImmersive;
   private needsPlace = true;
+  private inputSettled = true;
+  private timeSincePlacement = 0;
+  private handsFarContinuous = 0;
   private won = false;
   private winPlayed = false;
   private winHold = 0;
@@ -425,6 +431,12 @@ export class BoardSystem extends createSystem({
   private endPanelVisible = false;
   private restartPresses = 0;
   private lastRestartPress = -Infinity;
+
+  private recenterEntity: Entity | null = null;
+  private handEntity: Entity | null = null;
+  private tutorialEntity: Entity | null = null;
+  private resumeEntity: Entity | null = null;
+  private restartEntity: Entity | null = null;
 
   private readonly headPos = new Vector3();
   private readonly forward = new Vector3();
@@ -474,6 +486,7 @@ export class BoardSystem extends createSystem({
     window.addEventListener('pointerdown', resumeAudio);
     this.cleanupFuncs.push(
       this.visibilityState.subscribe((state) => {
+        const prev = this.xrState;
         this.xrState = state;
         if (state === VisibilityState.Visible || state === VisibilityState.NonImmersive) {
           this.needsPlace = true;
@@ -482,9 +495,16 @@ export class BoardSystem extends createSystem({
           this.endTwist();
           this.audio.suspend();
           this.save();
+          this.inputSettled = true;
+          this.timeSincePlacement = 0;
+          this.handsFarContinuous = 0;
         }
         if (state === VisibilityState.Visible) {
-          this.endTwist();
+          if (prev === VisibilityState.NonImmersive) {
+            this.onXrSessionStart();
+          } else {
+            this.endTwist();
+          }
           this.world.scene.background = null;
           this.audio.resume();
           this.checkFirstRunTutorial();
@@ -499,7 +519,47 @@ export class BoardSystem extends createSystem({
     this.installTestHook();
   }
 
+  private onXrSessionStart(): void {
+    const grab = this.world.getSystem(GrabSystem);
+    for (const piece of this.pieces) {
+      if (piece.entity) {
+        grab?.forceRelease(piece.entity);
+      }
+    }
+    this.endTwist();
+    this.hookHeld = null;
+    this.pinchHeldPiece = null;
+    this.pinchHand = null;
+
+    this.lastCenterPress = -Infinity;
+    this.lastHandPress = -Infinity;
+    this.lastTutorialPress = -Infinity;
+    this.lastResumePress = -Infinity;
+    this.lastRestartPress = -Infinity;
+
+    for (const entity of [
+      this.recenterEntity,
+      this.handEntity,
+      this.tutorialEntity,
+      this.resumeEntity,
+      this.restartEntity,
+    ]) {
+      if (entity?.hasComponent(Pressed)) {
+        entity.removeComponent(Pressed);
+      }
+    }
+
+    if (!readTutorialDone(localStorage)) {
+      this.tutorialChecked = false;
+    }
+
+    this.inputSettled = false;
+    this.timeSincePlacement = 0;
+    this.handsFarContinuous = 0;
+  }
+
   private recenter(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
     if (this.tutorialVisible) return;
     const now = performance.now();
     if (!bypassDebounce && now - this.lastCenterPress < BUTTON_DEBOUNCE_MS) return;
@@ -510,6 +570,7 @@ export class BoardSystem extends createSystem({
   }
 
   private toggleHandMirror(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
     if (this.tutorialVisible) return;
     const now = performance.now();
     if (!bypassDebounce && now - this.lastHandPress < BUTTON_DEBOUNCE_MS) return;
@@ -536,6 +597,7 @@ export class BoardSystem extends createSystem({
   }
 
   private advanceTutorial(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
     if (!this.tutorialVisible) return;
     const now = performance.now();
     if (!bypassDebounce && now - this.lastTutorialPress < BUTTON_DEBOUNCE_MS) return;
@@ -571,6 +633,7 @@ export class BoardSystem extends createSystem({
   }
 
   private resumeFromPanel(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
     if (this.tutorialVisible) return;
     const now = performance.now();
     if (!bypassDebounce && now - this.lastResumePress < BUTTON_DEBOUNCE_MS) return;
@@ -582,6 +645,7 @@ export class BoardSystem extends createSystem({
   }
 
   private restartGame(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
     if (this.tutorialVisible) return;
     const now = performance.now();
     if (!bypassDebounce && now - this.lastRestartPress < BUTTON_DEBOUNCE_MS) return;
@@ -598,7 +662,18 @@ export class BoardSystem extends createSystem({
     if (this.needsPlace) this.placeWhenReady();
     this.applyPause();
     if (!this.paused && !this.needsPlace) {
-      this.integrateTwist(delta);
+      this.updateInputSettled(delta);
+      if (this.inputSettled) {
+        this.integrateTwist(delta);
+      } else {
+        this.endTwist();
+        const grab = this.world.getSystem(GrabSystem);
+        for (const piece of this.pieces) {
+          if (piece.entity?.hasComponent(Grabbed)) {
+            grab?.forceRelease(piece.entity);
+          }
+        }
+      }
       this.integrateHand();
       this.integrateWin(delta);
       if (this.won) this.anim += delta;
@@ -608,6 +683,71 @@ export class BoardSystem extends createSystem({
     this.frameDesktopPreview();
     const pulse = this.won && !this.paused ? 1 + 0.12 * Math.sin(this.anim * 5) : 1;
     for (const target of this.targets) target.scale.setScalar(pulse);
+  }
+
+  private areHandsFar(): boolean {
+    const handSpaces = [
+      this.player.gripSpaces.left,
+      this.player.gripSpaces.right,
+      this.player.indexTipSpaces.left,
+      this.player.indexTipSpaces.right,
+    ].filter(Boolean);
+
+    const buttons = [
+      this.recenterMesh,
+      this.handMesh,
+      this.tutorialButtonMesh,
+      this.resumeButtonMesh,
+      this.restartButtonMesh,
+    ].filter((b): b is Mesh => Boolean(b && b.visible));
+
+    for (const space of handSpaces) {
+      space.updateWorldMatrix(true, false);
+      this.scratch.setFromMatrixPosition(space.matrixWorld);
+
+      for (const piece of this.pieces) {
+        if (!piece.movable) continue;
+        piece.object.updateWorldMatrix(true, false);
+        this.local.setFromMatrixPosition(piece.object.matrixWorld);
+        if (this.scratch.distanceTo(this.local) <= GENEROUS_GRAB_RADIUS) {
+          return false;
+        }
+      }
+
+      for (const button of buttons) {
+        button.updateWorldMatrix(true, false);
+        this.local.setFromMatrixPosition(button.matrixWorld);
+        if (this.scratch.distanceTo(this.local) <= BUTTON_SETTLE_DISTANCE) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  private updateInputSettled(delta: number): void {
+    if (this.inputSettled) return;
+    this.timeSincePlacement += delta;
+    if (this.areHandsFar()) {
+      this.handsFarContinuous += delta;
+    } else {
+      this.handsFarContinuous = 0;
+    }
+    if (this.handsFarContinuous >= SETTLE_HOLD_TIME || this.timeSincePlacement >= SETTLE_TIMEOUT) {
+      this.inputSettled = true;
+      for (const entity of [
+        this.recenterEntity,
+        this.handEntity,
+        this.tutorialEntity,
+        this.resumeEntity,
+        this.restartEntity,
+      ]) {
+        if (entity?.hasComponent(Pressed)) {
+          entity.removeComponent(Pressed);
+        }
+      }
+    }
   }
 
   private buildStatic(): void {
@@ -745,6 +885,7 @@ export class BoardSystem extends createSystem({
     });
     recenterEntity.addComponent(PokeInteractable);
     recenterEntity.addComponent(RecenterButton);
+    this.recenterEntity = recenterEntity;
 
     this.handMaterial = new MeshBasicMaterial({
       map: labelTexture('Hand', '#3dffb0', '#04140c'),
@@ -757,6 +898,7 @@ export class BoardSystem extends createSystem({
     const handEntity = this.world.createTransformEntity(hand, { parent: this.boardEntity });
     handEntity.addComponent(PokeInteractable);
     handEntity.addComponent(HandMirrorButton);
+    this.handEntity = handEntity;
     this.paintHandButton();
 
     this.tutorialButtonMaterial = new MeshBasicMaterial({
@@ -774,6 +916,7 @@ export class BoardSystem extends createSystem({
     });
     tutorialEntity.addComponent(PokeInteractable);
     tutorialEntity.addComponent(TutorialButton);
+    this.tutorialEntity = tutorialEntity;
 
     const resumeBtnGeom = new BoxGeometry(0.09, 0.032, 0.018);
     const resumeBtn = new Mesh(
@@ -792,6 +935,7 @@ export class BoardSystem extends createSystem({
     });
     resumeEntity.addComponent(PokeInteractable);
     resumeEntity.addComponent(ResumeButton);
+    this.resumeEntity = resumeEntity;
 
     const restartBtnGeom = new BoxGeometry(0.09, 0.032, 0.018);
     const restartBtn = new Mesh(
@@ -810,6 +954,7 @@ export class BoardSystem extends createSystem({
     });
     restartEntity.addComponent(PokeInteractable);
     restartEntity.addComponent(RestartButton);
+    this.restartEntity = restartEntity;
   }
 
   private loadLevel(index: number, angles: number[] | null): void {
@@ -1177,6 +1322,7 @@ export class BoardSystem extends createSystem({
   }
 
   private getActiveGrab(): { piece: LivePiece; hand: 'left' | 'right' } | null {
+    if (!this.inputSettled) return null;
     const grabbed = this.grabbedPiece();
     if (grabbed?.entity) {
       const hand = this.world.getSystem(GrabSystem)?.getHolderHand(grabbed.entity);
@@ -1738,6 +1884,7 @@ export class BoardSystem extends createSystem({
     return {
       level: this.levelIndex + 1,
       paused: this.paused,
+      inputSettled: this.inputSettled,
       won: this.won,
       lit: this.lit.slice(),
       grabbed: held ? pieceId(held) : null,

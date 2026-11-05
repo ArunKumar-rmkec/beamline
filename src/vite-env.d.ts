@@ -25,6 +25,11 @@ interface BeamlineTestApi {
     lit: boolean[];
     grabbed: string | null;
     handMirror?: { enabled: boolean; visible: boolean };
+    layout?: {
+      bottomPieceEdgeY: number;
+      buttonTopY: number;
+      gapM: number;
+    };
     ui: {
       tutorial: { visible: boolean; step: number };
       pausedPanel: boolean;

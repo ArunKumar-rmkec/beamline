@@ -35,7 +35,7 @@ export const EDGE_BUTTON_WIDTH = 0.088;
 export const EDGE_BUTTON_HEIGHT = 0.036;
 export const EDGE_BUTTON_DEPTH = 0.02;
 /** Board-local Y of a near-edge button center. Negative Y is toward the player. */
-export const EDGE_BUTTON_Y = -BOARD_HEIGHT / 2 - EDGE_BUTTON_HEIGHT / 2 - 0.005;
+export const EDGE_BUTTON_Y = -BOARD_HEIGHT / 2 - EDGE_BUTTON_HEIGHT / 2 - 0.030;
 
 /**
  * Degrees below a level gaze for a point on the board's Y axis.

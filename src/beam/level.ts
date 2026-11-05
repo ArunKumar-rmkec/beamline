@@ -9,15 +9,38 @@ export const BLOCKER_HALF_WIDTH = 0.026;
 export const BLOCKER_HALF_HEIGHT = 0.024;
 
 /**
- * Seated placement. 50cm is inside the doc's 45–55cm range.
- * The drop puts the board at chest-to-lap height while the center stays
- * inside a 2ft reach. The surface tilt is derived from those two so the
- * board reads as a tray table instead of a steep screen.
+ * Seated placement. IWER's default hands rest about 36cm ahead and 10cm
+ * below the head, and the emulator looks out with a 90° vertical view.
+ * 40cm forward and 15cm down keeps the whole tray inside that view and
+ * inside a seated reach on a Quest. The side shift puts the first mirror
+ * under the resting right hand, so that hand can pinch it without moving.
+ * The tilt faces the surface at the player.
  */
-export const BOARD_FORWARD_M = 0.5;
-export const BOARD_DROP_M = 0.34;
+export const BOARD_FORWARD_M = 0.4;
+export const BOARD_DROP_M = 0.15;
+/** Meters to the player's right of the facing direction. */
+export const BOARD_SIDE_M = 0.28;
 /** Radians from horizontal. Far edge up, surface facing the seated player. */
 export const TRAY_TILT_RADIANS = Math.atan2(BOARD_FORWARD_M, BOARD_DROP_M);
+
+/** Near-edge poke targets. They sit on the lip, fully on the board. */
+export const EDGE_BUTTON_WIDTH = 0.092;
+export const EDGE_BUTTON_HEIGHT = 0.05;
+export const EDGE_BUTTON_DEPTH = 0.02;
+/** Board-local Y of a near-edge button center. Negative Y is toward the player. */
+export const EDGE_BUTTON_Y = -BOARD_HEIGHT / 2 + EDGE_BUTTON_HEIGHT / 2;
+
+/**
+ * Degrees below a level gaze for a point on the board's Y axis.
+ * Matches the tray basis: local +Y is the far edge.
+ */
+export function trayDepressionDegrees(localY: number): number {
+  const sin = Math.sin(TRAY_TILT_RADIANS);
+  const cos = Math.cos(TRAY_TILT_RADIANS);
+  const y = -BOARD_DROP_M + localY * sin;
+  const z = -BOARD_FORWARD_M - localY * cos;
+  return (Math.atan2(-y, -z) * 180) / Math.PI;
+}
 
 export function cellCenter(col: number, row: number): { x: number; y: number } {
   const cellWidth = BOARD_WIDTH / GRID_COLS;

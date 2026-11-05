@@ -33,10 +33,15 @@ import { BoardAudio } from './audio.js';
 import {
   BOARD_DROP_M,
   BOARD_FORWARD_M,
+  BOARD_SIDE_M,
   BOARD_HEIGHT,
   BOARD_WIDTH,
   BLOCKER_HALF_HEIGHT,
   BLOCKER_HALF_WIDTH,
+  EDGE_BUTTON_DEPTH,
+  EDGE_BUTTON_HEIGHT,
+  EDGE_BUTTON_WIDTH,
+  EDGE_BUTTON_Y,
   GRID_COLS,
   GRID_ROWS,
   MIRROR_HALF_LENGTH,
@@ -54,6 +59,7 @@ import {
 } from './beam/levels.js';
 import { palmOutgoingDegrees } from './beam/palm.js';
 import {
+  SNAP_STEP_RADIANS,
   chooseTwistDelta,
   signedTwist,
   smoothAngle,
@@ -175,15 +181,29 @@ function labelTexture(text: string, fill: string, ink: string): CanvasTexture {
   if (context) {
     context.fillStyle = fill;
     context.fillRect(0, 0, canvas.width, canvas.height);
+    context.strokeStyle = '#140e04';
+    context.lineWidth = 16;
+    context.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
     context.fillStyle = ink;
-    context.font = 'bold 64px sans-serif';
+    context.strokeStyle = ink;
+    context.font = 'bold 72px sans-serif';
     context.textAlign = 'center';
     context.textBaseline = 'middle';
+    context.lineWidth = 10;
+    context.strokeText(text, 128, 68);
     context.fillText(text, 128, 68);
   }
   const texture = new CanvasTexture(canvas);
   texture.colorSpace = SRGBColorSpace;
   return texture;
+}
+
+function pieceId(piece: LivePiece): string {
+  return `${piece.type}-${piece.col}-${piece.row}`;
+}
+
+function roundMm(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
 
 function gridLines(): LineSegments {
@@ -254,7 +274,7 @@ export class BoardSystem extends createSystem({
 
   private boardEntity: Entity | null = null;
   private boardMaterial!: MeshStandardMaterial;
-  private handMaterial!: MeshStandardMaterial;
+  private handMaterial!: MeshBasicMaterial;
   private banner!: Mesh;
   private pausedBanner!: Mesh;
   private levelLabel!: Mesh;
@@ -289,6 +309,10 @@ export class BoardSystem extends createSystem({
   private handEnabled = false;
   private handLocked = false;
   private handSpec: BeamHand | null = null;
+  private hookPaused = false;
+  private hookHeld: LivePiece | null = null;
+  private testMode = false;
+  private lit: boolean[] = [];
 
   private readonly headPos = new Vector3();
   private readonly forward = new Vector3();
@@ -353,6 +377,7 @@ export class BoardSystem extends createSystem({
     );
     this.xrState = this.visibilityState.value;
     this.applyPause();
+    this.installTestHook();
   }
 
   update(delta: number): void {
@@ -437,34 +462,31 @@ export class BoardSystem extends createSystem({
     );
     this.boardEntity = this.world.createTransformEntity(this.board, { persistent: true });
 
+    const buttonGeometry = new BoxGeometry(
+      EDGE_BUTTON_WIDTH,
+      EDGE_BUTTON_HEIGHT,
+      EDGE_BUTTON_DEPTH,
+    );
     const recenter = new Mesh(
-      new BoxGeometry(0.055, 0.04, 0.014),
-      new MeshStandardMaterial({
-        map: labelTexture('Center', '#f0b429', '#241802'),
-        roughness: 0.55,
-        metalness: 0.05,
-        emissive: 0x8a5a10,
-        emissiveIntensity: 0.35,
+      buttonGeometry,
+      new MeshBasicMaterial({
+        map: labelTexture('Center', '#ffe14a', '#1a1000'),
       }),
     );
     recenter.name = 'recenter';
-    recenter.position.set(-0.04, -BOARD_HEIGHT / 2 + 0.026, 0.016);
+    recenter.position.set(-0.07, EDGE_BUTTON_Y, 0.012);
     const recenterEntity = this.world.createTransformEntity(recenter, {
       parent: this.boardEntity,
     });
     recenterEntity.addComponent(PokeInteractable);
     recenterEntity.addComponent(RecenterButton);
 
-    this.handMaterial = new MeshStandardMaterial({
-      map: labelTexture('Hand', '#d7fff0', '#06241a'),
-      roughness: 0.5,
-      metalness: 0.05,
-      emissive: 0x1a3348,
-      emissiveIntensity: 0.4,
+    this.handMaterial = new MeshBasicMaterial({
+      map: labelTexture('Hand', '#3dffb0', '#04140c'),
     });
-    const hand = new Mesh(new BoxGeometry(0.055, 0.04, 0.014), this.handMaterial);
+    const hand = new Mesh(buttonGeometry, this.handMaterial);
     hand.name = 'hand-mirror';
-    hand.position.set(0.05, -BOARD_HEIGHT / 2 + 0.026, 0.016);
+    hand.position.set(0.07, EDGE_BUTTON_Y, 0.012);
     const handEntity = this.world.createTransformEntity(hand, { parent: this.boardEntity });
     handEntity.addComponent(PokeInteractable);
     handEntity.addComponent(HandMirrorButton);
@@ -497,6 +519,7 @@ export class BoardSystem extends createSystem({
     this.paintLevel();
     this.hideSparks();
     this.banner.visible = false;
+    this.hookHeld = null;
     this.syncBeam();
     this.save();
   }
@@ -593,8 +616,7 @@ export class BoardSystem extends createSystem({
   }
 
   private paintHandButton(): void {
-    this.handMaterial.emissive.setHex(this.handEnabled ? 0x1d6a4a : 0x1a3348);
-    this.handMaterial.emissiveIntensity = this.handEnabled ? 0.8 : 0.4;
+    this.handMaterial.color.setHex(this.handEnabled ? 0xd6ffe8 : 0xffffff);
   }
 
   private paintTarget(index: number, lit: boolean): void {
@@ -615,6 +637,7 @@ export class BoardSystem extends createSystem({
 
   private simPaused(): boolean {
     return (
+      this.hookPaused ||
       this.docHidden ||
       this.xrState === VisibilityState.Hidden ||
       this.xrState === VisibilityState.VisibleBlurred
@@ -657,6 +680,12 @@ export class BoardSystem extends createSystem({
     this.forward.normalize();
     this.boardPos.copy(this.headPos).addScaledVector(this.forward, BOARD_FORWARD_M);
     this.boardPos.y -= BOARD_DROP_M;
+    // Player's right, so the resting right hand meets the first mirror.
+    this.scratch.set(-this.forward.z, 0, this.forward.x);
+    if (this.scratch.lengthSq() > 1e-8) {
+      this.scratch.normalize().multiplyScalar(BOARD_SIDE_M);
+      this.boardPos.add(this.scratch);
+    }
     this.orientTray(this.forward);
     this.board.position.copy(this.boardPos);
     this.board.updateWorldMatrix(true, true);
@@ -904,7 +933,7 @@ export class BoardSystem extends createSystem({
   private integrateWin(delta: number): void {
     if (!this.won) return;
     this.stepSparks(delta);
-    if (this.levelIndex >= LEVELS.length - 1) return;
+    if (this.levelIndex >= LEVELS.length - 1 || this.testMode) return;
     // A long first frame must not skip the payoff.
     this.winHold += Math.min(delta, 0.05);
     if (this.winHold < WIN_HOLD) return;
@@ -922,6 +951,7 @@ export class BoardSystem extends createSystem({
     const result = solveBeam(boardFromLevel(this.level, angles, hand ?? undefined));
     this.rebuildBeam(result.segments);
     this.won = result.hitTarget;
+    this.lit = result.lit.slice();
     result.lit.forEach((lit, index) => this.paintTarget(index, lit));
     this.boardMaterial.emissive.setHex(this.won ? 0x24523a : 0x0c1824);
     this.boardMaterial.emissiveIntensity = this.won ? 0.7 : 0.85;
@@ -1015,5 +1045,162 @@ export class BoardSystem extends createSystem({
 
   private save(): void {
     writeProgress(localStorage, { level: this.levelIndex, angles: this.angleList() });
+  }
+
+  /**
+   * `?test=1` only. Exposes `window.beamline` and Q/E/Tab/N so a playtest
+   * can drive the board without a headset.
+   */
+  private installTestHook(): void {
+    if (new URLSearchParams(window.location.search).get('test') !== '1') return;
+    this.testMode = true;
+    const api = {
+      state: () => this.hookState(),
+      grab: (id: string) => this.hookGrab(id),
+      rotate: (id: string, steps: number) => this.hookRotate(id, steps),
+      release: () => this.hookRelease(),
+      level: (n: number) => this.hookLevel(n),
+      pause: () => this.hookPause(true),
+      resume: () => this.hookPause(false),
+    };
+    window.beamline = api;
+    const onKey = (event: KeyboardEvent) => this.onTestKey(event);
+    window.addEventListener('keydown', onKey, true);
+    this.cleanupFuncs.push(() => {
+      window.removeEventListener('keydown', onKey, true);
+      if (window.beamline === api) delete window.beamline;
+    });
+  }
+
+  private onTestKey(event: KeyboardEvent): void {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      (target instanceof HTMLElement && target.isContentEditable)
+    ) {
+      return;
+    }
+    if (event.code === 'KeyQ') {
+      event.preventDefault();
+      event.stopPropagation();
+      this.hookNudge(-1);
+    } else if (event.code === 'KeyE') {
+      event.preventDefault();
+      event.stopPropagation();
+      this.hookNudge(1);
+    } else if (event.code === 'Tab') {
+      event.preventDefault();
+      event.stopPropagation();
+      this.hookCycle(event.shiftKey ? -1 : 1);
+    } else if (event.code === 'KeyN') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.levelIndex < LEVELS.length - 1) this.hookLevel(this.levelIndex + 2);
+    }
+  }
+
+  private hookNudge(steps: number): void {
+    const piece = this.hookHeld ?? this.pieces.find((item) => item.movable);
+    if (!piece) return;
+    this.hookRotate(pieceId(piece), steps);
+  }
+
+  private hookCycle(direction: number): void {
+    const movable = this.pieces.filter((piece) => piece.movable);
+    if (movable.length === 0) return;
+    const current = this.hookHeld ? movable.indexOf(this.hookHeld) : -1;
+    const next = (current + direction + movable.length) % movable.length;
+    const piece = movable[next];
+    if (piece) this.hookGrab(pieceId(piece));
+  }
+
+  private hookPause(paused: boolean): void {
+    this.hookPaused = paused;
+    this.applyPause();
+  }
+
+  private hookLevel(n: number): void {
+    if (!Number.isInteger(n) || n < 1 || n > LEVELS.length) return;
+    this.hookPaused = false;
+    this.loadLevel(n - 1, null);
+    this.applyPause();
+  }
+
+  private hookGrab(id: string): boolean {
+    const piece = this.pieceById(id);
+    if (!piece || !piece.movable) return false;
+    this.hookHeld = piece;
+    return true;
+  }
+
+  private hookRotate(id: string, steps: number): boolean {
+    const piece = this.pieceById(id);
+    if (!piece || !piece.movable || !Number.isFinite(steps)) return false;
+    this.hookHeld = piece;
+    if (piece.entity) this.world.getSystem(GrabSystem)?.forceRelease(piece.entity);
+    const next = piece.committed + Math.trunc(steps) * SNAP_STEP_RADIANS;
+    piece.committed = next;
+    piece.smoothed = next;
+    this.audio.tick();
+    this.save();
+    this.syncBeam();
+    return true;
+  }
+
+  private hookRelease(): void {
+    const piece = this.hookHeld ?? this.grabbedPiece();
+    if (piece?.entity) this.world.getSystem(GrabSystem)?.forceRelease(piece.entity);
+    this.hookHeld = null;
+    this.endTwist();
+  }
+
+  private pieceById(id: string): LivePiece | null {
+    const exact = this.pieces.find((piece) => pieceId(piece) === id);
+    if (exact) return exact;
+    if (/^\d+$/.test(id)) {
+      const movable = this.pieces.filter((piece) => piece.movable);
+      return movable[Number(id)] ?? null;
+    }
+    return null;
+  }
+
+  private headRelative(object: Object3D): { x: number; y: number; z: number } {
+    this.player.head.updateWorldMatrix(true, false);
+    this.headPos.setFromMatrixPosition(this.player.head.matrixWorld);
+    object.updateWorldMatrix(true, false);
+    this.scratch.setFromMatrixPosition(object.matrixWorld).sub(this.headPos);
+    this.player.head.getWorldQuaternion(this.scratchQuat);
+    this.scratch.applyQuaternion(this.scratchQuat.invert());
+    return { x: roundMm(this.scratch.x), y: roundMm(this.scratch.y), z: roundMm(this.scratch.z) };
+  }
+
+  private hookState() {
+    const held = this.grabbedPiece() ?? this.hookHeld;
+    return {
+      level: this.levelIndex + 1,
+      paused: this.paused,
+      won: this.won,
+      lit: this.lit.slice(),
+      grabbed: held ? pieceId(held) : null,
+      pieces: this.pieces.map((piece) => ({
+        id: pieceId(piece),
+        type: piece.type,
+        col: piece.col,
+        row: piece.row,
+        movable: piece.movable,
+        degrees: pieceDegrees(piece),
+      })),
+      pose: {
+        hands: {
+          left: this.headRelative(this.player.gripSpaces.left),
+          right: this.headRelative(this.player.gripSpaces.right),
+        },
+        pieces: this.pieces
+          .filter((piece) => piece.movable)
+          .map((piece) => ({ id: pieceId(piece), ...this.headRelative(piece.object) })),
+      },
+    };
   }
 }

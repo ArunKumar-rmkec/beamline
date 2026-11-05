@@ -1,11 +1,23 @@
 /**
  * Short sounds from oscillators. Nothing is fetched.
- * The context stays suspended until a click or an XR session resumes it.
+ * The AudioContext is lazily created only on the first user interaction,
+ * preventing audio engine startup during cold start.
  */
 export class BoardAudio {
   private context: AudioContext | null = null;
+  private interacted = false;
+
+  interact(): void {
+    this.interacted = true;
+    this.resume();
+  }
+
+  hasContext(): boolean {
+    return this.context !== null;
+  }
 
   private contextOrNull(): AudioContext | null {
+    if (!this.interacted) return null;
     const AudioCtor = window.AudioContext ?? window.webkitAudioContext;
     if (!AudioCtor) return null;
     this.context ??= new AudioCtor();
@@ -13,6 +25,7 @@ export class BoardAudio {
   }
 
   resume(): void {
+    if (!this.interacted) return;
     const context = this.contextOrNull();
     if (context && context.state === 'suspended') void context.resume();
   }
@@ -23,11 +36,13 @@ export class BoardAudio {
 
   /** Soft tick when a piece snaps to the next 15° step. */
   tick(): void {
+    this.interacted = true;
     this.blip(740, 0.045, 'square', 0.04);
   }
 
   /** A short major chord when every target is lit. */
   win(): void {
+    this.interacted = true;
     this.blip(523.25, 0.42, 'sine', 0.07);
     this.blip(659.25, 0.48, 'sine', 0.06, 0.04);
     this.blip(783.99, 0.55, 'sine', 0.05, 0.08);

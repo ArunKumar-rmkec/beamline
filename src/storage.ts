@@ -3,10 +3,12 @@ export const STORAGE_PREFIX = 'beamline:';
 export const MIRROR_ROT_KEY = `${STORAGE_PREFIX}mirror-rot`;
 export const PROGRESS_KEY = `${STORAGE_PREFIX}progress`;
 export const HAND_MIRROR_KEY = `${STORAGE_PREFIX}hand-mirror`;
+export const TUTORIAL_KEY = `${STORAGE_PREFIX}tutorial`;
 
 export interface KeyValueStore {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 export interface Progress {
@@ -97,5 +99,33 @@ export function writeHandMirror(store: KeyValueStore, enabled: boolean): void {
     store.setItem(HAND_MIRROR_KEY, enabled ? '1' : '0');
   } catch {
     // The toggle still flips in memory.
+  }
+}
+
+export function readTutorialDone(store: KeyValueStore): boolean {
+  try {
+    return store.getItem(TUTORIAL_KEY) === 'done';
+  } catch {
+    return false;
+  }
+}
+
+export function writeTutorialDone(store: KeyValueStore): void {
+  try {
+    store.setItem(TUTORIAL_KEY, 'done');
+  } catch {
+    // Falls back without throwing.
+  }
+}
+
+export function clearTutorial(store: KeyValueStore): void {
+  try {
+    if (typeof store.removeItem === 'function') {
+      store.removeItem(TUTORIAL_KEY);
+    } else {
+      store.setItem(TUTORIAL_KEY, '');
+    }
+  } catch {
+    // Falls back without throwing.
   }
 }

@@ -4,13 +4,17 @@ import {
   HAND_MIRROR_KEY,
   MIRROR_ROT_KEY,
   PROGRESS_KEY,
+  TUTORIAL_KEY,
+  clearTutorial,
   readHandMirror,
   readMirrorDegrees,
   readProgress,
+  readTutorialDone,
   STORAGE_PREFIX,
   writeHandMirror,
   writeMirrorDegrees,
   writeProgress,
+  writeTutorialDone,
   type KeyValueStore,
 } from './storage.ts';
 
@@ -23,6 +27,9 @@ function memoryStore(): KeyValueStore & { values: Map<string, string> } {
     },
     setItem(key, value) {
       values.set(key, value);
+    },
+    removeItem(key) {
+      values.delete(key);
     },
   };
 }
@@ -106,4 +113,19 @@ test('corrupt or blocked storage falls back without throwing', () => {
   assert.doesNotThrow(() => writeMirrorDegrees(blocked, 30));
   assert.doesNotThrow(() => writeProgress(blocked, { level: 0, angles: [0] }));
   assert.doesNotThrow(() => writeHandMirror(blocked, true));
+  assert.equal(readTutorialDone(blocked), false);
+  assert.doesNotThrow(() => writeTutorialDone(blocked));
+  assert.doesNotThrow(() => clearTutorial(blocked));
+});
+
+test('tutorial state round-trips and clears under beamline:tutorial', () => {
+  const store = memoryStore();
+  assert.equal(TUTORIAL_KEY, 'beamline:tutorial');
+  assert.equal(readTutorialDone(store), false);
+  writeTutorialDone(store);
+  assert.equal(store.values.get(TUTORIAL_KEY), 'done');
+  assert.equal(readTutorialDone(store), true);
+  clearTutorial(store);
+  assert.equal(store.values.has(TUTORIAL_KEY), false);
+  assert.equal(readTutorialDone(store), false);
 });

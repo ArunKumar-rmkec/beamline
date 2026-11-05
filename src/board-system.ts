@@ -74,8 +74,22 @@ import {
   type Vec3,
 } from './beam/snap.js';
 import { solveBeam, type BeamHand, type BeamSegment } from './beam/solver.js';
-import { HandMirrorButton, RecenterButton } from './components.js';
-import { readHandMirror, readProgress, writeHandMirror, writeProgress } from './storage.js';
+import {
+  HandMirrorButton,
+  RecenterButton,
+  RestartButton,
+  ResumeButton,
+  TutorialButton,
+} from './components.js';
+import {
+  clearTutorial,
+  readHandMirror,
+  readProgress,
+  readTutorialDone,
+  writeHandMirror,
+  writeProgress,
+  writeTutorialDone,
+} from './storage.js';
 
 const PIECE_Z = 0.02;
 const BEAM_Z = 0.018;
@@ -212,6 +226,56 @@ function labelTexture(text: string, fill: string, ink: string): CanvasTexture {
   return texture;
 }
 
+const TUTORIAL_STEPS = [
+  'Poke buttons with your finger',
+  'Pinch a mirror to grab it',
+  'Twist your hand to rotate',
+] as const;
+
+function tutorialCardTexture(text: string): CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 180;
+  const context = canvas.getContext('2d');
+  if (context) {
+    context.fillStyle = '#102033';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.strokeStyle = 'rgba(8, 10, 14, 0.45)';
+    context.lineWidth = 8;
+    context.strokeRect(6, 6, canvas.width - 12, canvas.height - 12);
+    context.fillStyle = '#f4f7fb';
+    context.font = '600 30px Inter, "Liberation Sans", sans-serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(text, canvas.width / 2, 48);
+  }
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  return texture;
+}
+
+function panelCardTexture(title: string, fill = '#102033', ink = '#f4f7fb', fontSize = 72): CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 256;
+  const context = canvas.getContext('2d');
+  if (context) {
+    context.fillStyle = fill;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.strokeStyle = 'rgba(8, 10, 14, 0.45)';
+    context.lineWidth = 10;
+    context.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
+    context.fillStyle = ink;
+    context.font = `700 ${fontSize}px Inter, "Liberation Sans", sans-serif`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(title, canvas.width / 2, 75);
+  }
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  return texture;
+}
+
 function pieceId(piece: LivePiece): string {
   return `${piece.type}-${piece.col}-${piece.row}`;
 }
@@ -275,6 +339,9 @@ function pieceDegrees(piece: LivePiece): number {
 export class BoardSystem extends createSystem({
   recenterPressed: { required: [RecenterButton, Pressed] },
   handPressed: { required: [HandMirrorButton, Pressed] },
+  tutorialPressed: { required: [TutorialButton, Pressed] },
+  resumePressed: { required: [ResumeButton, Pressed] },
+  restartPressed: { required: [RestartButton, Pressed] },
 }) {
   private readonly board = new Group();
   private readonly beamGroup = new Group();
@@ -290,7 +357,8 @@ export class BoardSystem extends createSystem({
   private boardMaterial!: MeshStandardMaterial;
   private handMaterial!: MeshBasicMaterial;
   private banner!: Mesh;
-  private pausedBanner!: Mesh;
+  private pausedCard!: Mesh;
+  private resumeButtonMesh!: Mesh;
   private levelLabel!: Mesh;
   private sourceMesh: Mesh | null = null;
   private level: LevelDef = LEVELS[0] ?? {
@@ -339,6 +407,24 @@ export class BoardSystem extends createSystem({
   private lastCenterPress = -Infinity;
   private lastHandPress = -Infinity;
 
+  private tutorialCard!: Mesh;
+  private tutorialButtonMesh!: Mesh;
+  private tutorialButtonMaterial!: MeshBasicMaterial;
+  private tutorialStep = 0;
+  private tutorialVisible = false;
+  private tutorialChecked = false;
+  private tutorialPresses = 0;
+  private lastTutorialPress = -Infinity;
+
+  private resumePresses = 0;
+  private lastResumePress = -Infinity;
+
+  private endCard!: Mesh;
+  private restartButtonMesh!: Mesh;
+  private endPanelVisible = false;
+  private restartPresses = 0;
+  private lastRestartPress = -Infinity;
+
   private readonly headPos = new Vector3();
   private readonly forward = new Vector3();
   private readonly boardPos = new Vector3();
@@ -367,6 +453,15 @@ export class BoardSystem extends createSystem({
       this.queries.handPressed.subscribe('qualify', () => {
         this.toggleHandMirror();
       }),
+      this.queries.tutorialPressed.subscribe('qualify', () => {
+        this.advanceTutorial();
+      }),
+      this.queries.resumePressed.subscribe('qualify', () => {
+        this.resumeFromPanel();
+      }),
+      this.queries.restartPressed.subscribe('qualify', () => {
+        this.restartGame();
+      }),
     );
 
     const onDocumentVisibility = () => {
@@ -374,7 +469,7 @@ export class BoardSystem extends createSystem({
       this.applyPause();
     };
     document.addEventListener('visibilitychange', onDocumentVisibility);
-    const resumeAudio = () => this.audio.resume();
+    const resumeAudio = () => this.audio.interact();
     window.addEventListener('pointerdown', resumeAudio);
     this.cleanupFuncs.push(
       this.visibilityState.subscribe((state) => {
@@ -390,6 +485,7 @@ export class BoardSystem extends createSystem({
         if (state === VisibilityState.Visible) {
           this.world.scene.background = null;
           this.audio.resume();
+          this.checkFirstRunTutorial();
         }
         this.applyPause();
       }),
@@ -406,6 +502,7 @@ export class BoardSystem extends createSystem({
     if (now - this.lastCenterPress < BUTTON_DEBOUNCE_MS) return;
     this.lastCenterPress = now;
     this.centerPresses += 1;
+    this.audio.interact();
     this.needsPlace = true;
   }
 
@@ -414,6 +511,7 @@ export class BoardSystem extends createSystem({
     if (now - this.lastHandPress < BUTTON_DEBOUNCE_MS) return;
     this.lastHandPress = now;
     this.handPresses += 1;
+    this.audio.interact();
     this.handEnabled = !this.handEnabled;
     this.handLocked = false;
     this.handSpec = null;
@@ -421,6 +519,73 @@ export class BoardSystem extends createSystem({
     writeHandMirror(localStorage, this.handEnabled);
     this.paintHandButton();
     this.syncBeam();
+  }
+
+  private checkFirstRunTutorial(): void {
+    if (this.tutorialChecked) return;
+    this.tutorialChecked = true;
+    if (!readTutorialDone(localStorage)) {
+      this.tutorialStep = 0;
+      this.tutorialVisible = true;
+      this.updateTutorialCard();
+    }
+  }
+
+  private advanceTutorial(): void {
+    if (!this.tutorialVisible) return;
+    const now = performance.now();
+    if (now - this.lastTutorialPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastTutorialPress = now;
+    this.tutorialPresses += 1;
+    this.audio.interact();
+    if (this.tutorialStep < TUTORIAL_STEPS.length - 1) {
+      this.tutorialStep += 1;
+      this.updateTutorialCard();
+    } else {
+      this.tutorialVisible = false;
+      if (this.tutorialCard) this.tutorialCard.visible = false;
+      if (this.tutorialButtonMesh) this.tutorialButtonMesh.visible = false;
+      writeTutorialDone(localStorage);
+    }
+  }
+
+  private updateTutorialCard(): void {
+    if (!this.tutorialCard || !this.tutorialButtonMesh) return;
+    this.tutorialCard.visible = this.tutorialVisible;
+    this.tutorialButtonMesh.visible = this.tutorialVisible;
+    if (!this.tutorialVisible) return;
+    const cardMat = this.tutorialCard.material;
+    if (cardMat instanceof MeshBasicMaterial) {
+      cardMat.map?.dispose();
+      cardMat.map = tutorialCardTexture(TUTORIAL_STEPS[this.tutorialStep] ?? '');
+      cardMat.needsUpdate = true;
+    }
+    const btnText = this.tutorialStep === TUTORIAL_STEPS.length - 1 ? 'Got it' : 'Next';
+    this.tutorialButtonMaterial.map?.dispose();
+    this.tutorialButtonMaterial.map = labelTexture(btnText, '#ffe14a', '#1a1000');
+    this.tutorialButtonMaterial.needsUpdate = true;
+  }
+
+  private resumeFromPanel(): void {
+    const now = performance.now();
+    if (now - this.lastResumePress < BUTTON_DEBOUNCE_MS) return;
+    this.lastResumePress = now;
+    this.resumePresses += 1;
+    this.audio.interact();
+    this.hookPaused = false;
+    this.applyPause();
+  }
+
+  private restartGame(): void {
+    const now = performance.now();
+    if (now - this.lastRestartPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastRestartPress = now;
+    this.restartPresses += 1;
+    this.audio.interact();
+    this.endPanelVisible = false;
+    if (this.endCard) this.endCard.visible = false;
+    if (this.restartButtonMesh) this.restartButtonMesh.visible = false;
+    this.loadLevel(0, null);
   }
 
   update(delta: number): void {
@@ -461,17 +626,41 @@ export class BoardSystem extends createSystem({
     this.banner.position.set(0, BOARD_HEIGHT / 2 - 0.03, 0.03);
     this.banner.visible = false;
 
-    this.pausedBanner = new Mesh(
-      new PlaneGeometry(0.16, 0.05),
+    this.pausedCard = new Mesh(
+      new PlaneGeometry(0.24, 0.12),
       new MeshBasicMaterial({
-        map: labelTexture('Paused', '#102033', '#f4f7fb'),
+        map: panelCardTexture('Paused', '#102033', '#f4f7fb', 64),
         transparent: true,
         side: DoubleSide,
       }),
     );
-    this.pausedBanner.name = 'paused';
-    this.pausedBanner.position.set(0, 0, 0.06);
-    this.pausedBanner.visible = false;
+    this.pausedCard.name = 'paused';
+    this.pausedCard.position.set(0, 0.015, 0.055);
+    this.pausedCard.visible = false;
+
+    this.endCard = new Mesh(
+      new PlaneGeometry(0.26, 0.13),
+      new MeshBasicMaterial({
+        map: panelCardTexture('You finished!', '#102033', '#ffd23a', 52),
+        transparent: true,
+        side: DoubleSide,
+      }),
+    );
+    this.endCard.name = 'finished';
+    this.endCard.position.set(0, 0.015, 0.055);
+    this.endCard.visible = false;
+
+    this.tutorialCard = new Mesh(
+      new PlaneGeometry(0.28, 0.085),
+      new MeshBasicMaterial({
+        map: tutorialCardTexture(TUTORIAL_STEPS[0]),
+        transparent: true,
+        side: DoubleSide,
+      }),
+    );
+    this.tutorialCard.name = 'tutorial-card';
+    this.tutorialCard.position.set(0, BOARD_HEIGHT / 2 + 0.058, 0.02);
+    this.tutorialCard.visible = false;
 
     this.levelLabel = new Mesh(
       new PlaneGeometry(0.04, 0.028),
@@ -513,7 +702,9 @@ export class BoardSystem extends createSystem({
       this.beamGroup,
       this.sparkGroup,
       this.banner,
-      this.pausedBanner,
+      this.pausedCard,
+      this.endCard,
+      this.tutorialCard,
       this.levelLabel,
       this.handDisc,
       this.level1Cue,
@@ -561,6 +752,58 @@ export class BoardSystem extends createSystem({
     handEntity.addComponent(PokeInteractable);
     handEntity.addComponent(HandMirrorButton);
     this.paintHandButton();
+
+    this.tutorialButtonMaterial = new MeshBasicMaterial({
+      map: labelTexture('Next', '#ffe14a', '#1a1000'),
+    });
+    const tutorialBtnGeom = new BoxGeometry(0.075, 0.025, 0.016);
+    const tutorialBtn = new Mesh(tutorialBtnGeom, this.tutorialButtonMaterial);
+    tutorialBtn.name = 'tutorial-button';
+    tutorialBtn.position.set(0, BOARD_HEIGHT / 2 + 0.038, 0.026);
+    tutorialBtn.visible = false;
+    tutorialBtn.addEventListener('pointerdown', () => this.advanceTutorial());
+    this.tutorialButtonMesh = tutorialBtn;
+    const tutorialEntity = this.world.createTransformEntity(tutorialBtn, {
+      parent: this.boardEntity,
+    });
+    tutorialEntity.addComponent(PokeInteractable);
+    tutorialEntity.addComponent(TutorialButton);
+
+    const resumeBtnGeom = new BoxGeometry(0.09, 0.032, 0.018);
+    const resumeBtn = new Mesh(
+      resumeBtnGeom,
+      new MeshBasicMaterial({
+        map: labelTexture('Resume', '#3dffb0', '#04140c'),
+      }),
+    );
+    resumeBtn.name = 'resume-button';
+    resumeBtn.position.set(0, -0.024, 0.065);
+    resumeBtn.visible = false;
+    resumeBtn.addEventListener('pointerdown', () => this.resumeFromPanel());
+    this.resumeButtonMesh = resumeBtn;
+    const resumeEntity = this.world.createTransformEntity(resumeBtn, {
+      parent: this.boardEntity,
+    });
+    resumeEntity.addComponent(PokeInteractable);
+    resumeEntity.addComponent(ResumeButton);
+
+    const restartBtnGeom = new BoxGeometry(0.09, 0.032, 0.018);
+    const restartBtn = new Mesh(
+      restartBtnGeom,
+      new MeshBasicMaterial({
+        map: labelTexture('Restart', '#ffe14a', '#1a1000'),
+      }),
+    );
+    restartBtn.name = 'restart-button';
+    restartBtn.position.set(0, -0.024, 0.065);
+    restartBtn.visible = false;
+    restartBtn.addEventListener('pointerdown', () => this.restartGame());
+    this.restartButtonMesh = restartBtn;
+    const restartEntity = this.world.createTransformEntity(restartBtn, {
+      parent: this.boardEntity,
+    });
+    restartEntity.addComponent(PokeInteractable);
+    restartEntity.addComponent(RestartButton);
   }
 
   private loadLevel(index: number, angles: number[] | null): void {
@@ -589,6 +832,9 @@ export class BoardSystem extends createSystem({
     this.paintLevel();
     this.hideSparks();
     this.banner.visible = false;
+    this.endPanelVisible = false;
+    if (this.endCard) this.endCard.visible = false;
+    if (this.restartButtonMesh) this.restartButtonMesh.visible = false;
     this.hookHeld = null;
     this.syncBeam();
     this.save();
@@ -743,7 +989,12 @@ export class BoardSystem extends createSystem({
     const paused = this.simPaused();
     if (paused === this.paused) return;
     this.paused = paused;
-    this.pausedBanner.visible = paused;
+    if (this.pausedCard) this.pausedCard.visible = paused;
+    if (this.resumeButtonMesh) this.resumeButtonMesh.visible = paused;
+    if (this.endPanelVisible) {
+      if (this.endCard) this.endCard.visible = !paused;
+      if (this.restartButtonMesh) this.restartButtonMesh.visible = !paused;
+    }
     if (!paused) return;
     this.endTwist();
     this.audio.suspend();
@@ -1140,7 +1391,20 @@ export class BoardSystem extends createSystem({
     result.lit.forEach((lit, index) => this.paintTarget(index, lit));
     this.boardMaterial.emissive.setHex(this.won ? 0x24523a : 0x0c1824);
     this.boardMaterial.emissiveIntensity = this.won ? 0.7 : 0.85;
-    this.banner.visible = this.won;
+
+    const isLastLevel = this.levelIndex >= LEVELS.length - 1;
+    if (this.won && isLastLevel) {
+      this.endPanelVisible = true;
+      if (this.endCard) this.endCard.visible = !this.paused;
+      if (this.restartButtonMesh) this.restartButtonMesh.visible = !this.paused;
+      this.banner.visible = false;
+    } else {
+      this.endPanelVisible = false;
+      if (this.endCard) this.endCard.visible = false;
+      if (this.restartButtonMesh) this.restartButtonMesh.visible = false;
+      this.banner.visible = this.won;
+    }
+
     if (!this.won) {
       this.winPlayed = false;
       this.winHold = 0;
@@ -1253,6 +1517,8 @@ export class BoardSystem extends createSystem({
       level: (n: number) => this.hookLevel(n),
       pause: () => this.hookPause(true),
       resume: () => this.hookPause(false),
+      resetTutorial: () => this.hookResetTutorial(),
+      press: (button: string) => this.hookPress(button),
     };
     window.beamline = api;
     const onKey = (event: KeyboardEvent) => this.onTestKey(event);
@@ -1384,6 +1650,39 @@ export class BoardSystem extends createSystem({
     return { x: roundMm(this.scratch.x), y: roundMm(this.scratch.y), z: roundMm(this.scratch.z) };
   }
 
+  private hookResetTutorial(): void {
+    clearTutorial(localStorage);
+    this.tutorialChecked = false;
+    this.tutorialStep = 0;
+    this.tutorialVisible = true;
+    this.updateTutorialCard();
+  }
+
+  private hookPress(button: string): boolean {
+    const key = button.toLowerCase();
+    if (key === 'center' || key === 'recenter') {
+      this.recenter();
+      return true;
+    }
+    if (key === 'hand') {
+      this.toggleHandMirror();
+      return true;
+    }
+    if (key === 'tutorial' || key === 'next' || key === 'gotit' || key === 'got it') {
+      this.advanceTutorial();
+      return true;
+    }
+    if (key === 'resume') {
+      this.resumeFromPanel();
+      return true;
+    }
+    if (key === 'restart') {
+      this.restartGame();
+      return true;
+    }
+    return false;
+  }
+
   private hookState() {
     const held = this.grabbedPiece() ?? this.pinchHeldPiece ?? this.hookHeld;
     return {
@@ -1396,9 +1695,21 @@ export class BoardSystem extends createSystem({
         enabled: this.handEnabled,
         visible: this.handDisc.visible,
       },
+      ui: {
+        tutorial: {
+          visible: this.tutorialVisible,
+          step: this.tutorialStep,
+        },
+        pausedPanel: this.pausedCard ? this.pausedCard.visible : false,
+        endPanel: this.endPanelVisible,
+      },
       presses: {
         center: this.centerPresses,
         hand: this.handPresses,
+        tutorial: this.tutorialPresses,
+        next: this.tutorialPresses,
+        resume: this.resumePresses,
+        restart: this.restartPresses,
       },
       trayWorld: this.worldPoint(this.board),
       pieces: this.pieces.map((piece) => ({
@@ -1413,6 +1724,10 @@ export class BoardSystem extends createSystem({
         buttons: {
           center: this.worldPoint(this.recenterMesh),
           hand: this.worldPoint(this.handMesh),
+          tutorial: this.worldPoint(this.tutorialButtonMesh),
+          next: this.worldPoint(this.tutorialButtonMesh),
+          resume: this.worldPoint(this.resumeButtonMesh),
+          restart: this.worldPoint(this.restartButtonMesh),
         },
         hands: {
           left: this.headRelative(this.player.gripSpaces.left),

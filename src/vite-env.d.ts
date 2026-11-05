@@ -24,8 +24,33 @@ interface BeamlineTestApi {
     won: boolean;
     lit: boolean[];
     grabbed: string | null;
+    handMirror?: { enabled: boolean; visible: boolean };
+    ui: {
+      tutorial: { visible: boolean; step: number };
+      pausedPanel: boolean;
+      endPanel: boolean;
+    };
+    presses: {
+      center: number;
+      hand: number;
+      tutorial: number;
+      next?: number;
+      resume: number;
+      restart: number;
+      [button: string]: number | undefined;
+    };
+    trayWorld?: BeamlinePosePoint;
     pieces: BeamlinePieceState[];
     pose: {
+      buttons: {
+        center: BeamlinePosePoint;
+        hand: BeamlinePosePoint;
+        tutorial: BeamlinePosePoint;
+        next?: BeamlinePosePoint;
+        resume: BeamlinePosePoint;
+        restart: BeamlinePosePoint;
+        [button: string]: BeamlinePosePoint | undefined;
+      };
       hands: { left: BeamlinePosePoint; right: BeamlinePosePoint };
       pieces: Array<BeamlinePosePoint & { id: string }>;
     };
@@ -38,6 +63,8 @@ interface BeamlineTestApi {
   level(n: number): void;
   pause(): void;
   resume(): void;
+  resetTutorial(): void;
+  press?(button: string): boolean;
 }
 
 interface Window {

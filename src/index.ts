@@ -12,10 +12,21 @@ if (!(container instanceof HTMLDivElement)) {
 // Enter XR control; if that cannot start a session, the board stays on screen.
 hideIwerOfferChrome();
 
-World.create(container, projectOptions).then((world) => {
-  world.registerSystem(BoardSystem, { priority: 1 });
-  void installDesktopXRChrome(world);
-});
+World.create(container, projectOptions)
+  .then(async (world) => {
+    world.registerSystem(BoardSystem, { priority: 1 });
+    await installDesktopXRChrome(world);
+    hideLoadingIndicator();
+  })
+  .catch((err) => {
+    console.error('Failed to initialize scene:', err);
+    hideLoadingIndicator();
+  });
+
+function hideLoadingIndicator(): void {
+  const indicator = document.getElementById('loading-indicator');
+  if (indicator instanceof HTMLElement) indicator.hidden = true;
+}
 
 async function installDesktopXRChrome(world: World): Promise<void> {
   const button = ensureEnterButton();

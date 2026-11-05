@@ -22,20 +22,20 @@ export const BOARD_SIDE_M = 0;
 /** Visible pinch disc on a movable piece. */
 export const GRAB_PAD_RADIUS = 0.05;
 /**
- * Invisible grab disc used when a level has one movable piece.
- * A resting right hand sits about 28cm to the right of a centered mirror;
- * this radius still meets that grip.
+ * Generous reach radius ensuring resting hands at the default emulator pose (x=0.25)
+ * and seated players can reliably grab movable pieces.
  */
-export const SOLO_REACH_RADIUS = 0.27;
+export const GENEROUS_GRAB_RADIUS = 0.38;
+export const SOLO_REACH_RADIUS = GENEROUS_GRAB_RADIUS;
 /** Radians from horizontal. Far edge up, surface facing the seated player. */
 export const TRAY_TILT_RADIANS = Math.atan2(BOARD_FORWARD_M, BOARD_DROP_M);
 
-/** Near-edge poke targets. They sit on the lip, fully on the board. */
-export const EDGE_BUTTON_WIDTH = 0.092;
-export const EDGE_BUTTON_HEIGHT = 0.05;
+/** Near-edge poke targets. They sit outside the grid on the near edge shelf, never overlapping level geometry. */
+export const EDGE_BUTTON_WIDTH = 0.088;
+export const EDGE_BUTTON_HEIGHT = 0.036;
 export const EDGE_BUTTON_DEPTH = 0.02;
 /** Board-local Y of a near-edge button center. Negative Y is toward the player. */
-export const EDGE_BUTTON_Y = -BOARD_HEIGHT / 2 + EDGE_BUTTON_HEIGHT / 2;
+export const EDGE_BUTTON_Y = -BOARD_HEIGHT / 2 - EDGE_BUTTON_HEIGHT / 2 - 0.005;
 
 /**
  * Degrees below a level gaze for a point on the board's Y axis.

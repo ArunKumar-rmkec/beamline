@@ -4,6 +4,7 @@ import {
   BufferGeometry,
   CanvasTexture,
   Color,
+  ConeGeometry,
   CylinderGeometry,
   DoubleSide,
   Entity,
@@ -36,6 +37,7 @@ import {
   BOARD_SIDE_M,
   BOARD_HEIGHT,
   BOARD_WIDTH,
+  GENEROUS_GRAB_RADIUS,
   GRAB_PAD_RADIUS,
   SOLO_REACH_RADIUS,
   BLOCKER_HALF_HEIGHT,
@@ -62,6 +64,7 @@ import {
 import { palmOutgoingDegrees } from './beam/palm.js';
 import {
   SNAP_STEP_RADIANS,
+  angleFromStepsOrDegrees,
   chooseTwistDelta,
   signedTwist,
   smoothAngle,
@@ -78,7 +81,7 @@ const PIECE_Z = 0.02;
 const BEAM_Z = 0.018;
 const WIN_HOLD = 3.2;
 const HAND_REACH_Z = 0.16;
-const HAND_CATCH = 0.04;
+const HAND_CATCH = 0.08;
 const HAND_RADIUS = 0.03;
 /** A single-frame jump larger than this is a tracking loss, not a wrist. */
 const TRACKING_JUMP = (40 * Math.PI) / 180;
@@ -321,6 +324,11 @@ export class BoardSystem extends createSystem({
   private handSpec: BeamHand | null = null;
   private hookPaused = false;
   private hookHeld: LivePiece | null = null;
+  private pinchHeldPiece: LivePiece | null = null;
+  private pinchHand: 'left' | 'right' | null = null;
+  private lastPalm: { x: number; y: number; nx: number; ny: number; nz: number } | null = null;
+  private readonly level1Cue = new Group();
+  private cueAnim = 0;
   private testMode = false;
   private lit: boolean[] = [];
 
@@ -346,16 +354,10 @@ export class BoardSystem extends createSystem({
     this.buildStatic();
     this.loadLevel(this.levelIndex, saved?.angles ?? null);
     this.queries.recenterPressed.subscribe('qualify', () => {
-      this.needsPlace = true;
+      this.recenter();
     });
     this.queries.handPressed.subscribe('qualify', () => {
-      this.handEnabled = !this.handEnabled;
-      this.handLocked = false;
-      this.handSpec = null;
-      this.beamKey = '';
-      writeHandMirror(localStorage, this.handEnabled);
-      this.paintHandButton();
-      this.syncBeam();
+      this.toggleHandMirror();
     });
 
     const onDocumentVisibility = () => {
@@ -390,6 +392,20 @@ export class BoardSystem extends createSystem({
     this.installTestHook();
   }
 
+  private recenter(): void {
+    this.needsPlace = true;
+  }
+
+  private toggleHandMirror(): void {
+    this.handEnabled = !this.handEnabled;
+    this.handLocked = false;
+    this.handSpec = null;
+    this.beamKey = '';
+    writeHandMirror(localStorage, this.handEnabled);
+    this.paintHandButton();
+    this.syncBeam();
+  }
+
   update(delta: number): void {
     if (this.needsPlace) this.placeWhenReady();
     this.applyPause();
@@ -398,6 +414,7 @@ export class BoardSystem extends createSystem({
       this.integrateHand();
       this.integrateWin(delta);
       if (this.won) this.anim += delta;
+      this.updateLevel1Cue(delta);
     }
     this.layoutPieces();
     this.frameDesktopPreview();
@@ -460,6 +477,19 @@ export class BoardSystem extends createSystem({
       this.sparkGroup.add(mesh);
       this.sparks.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0 });
     }
+    const coneGeom = new ConeGeometry(0.012, 0.024, 16);
+    coneGeom.rotateZ(Math.PI);
+    const coneMesh = new Mesh(coneGeom, new MeshBasicMaterial({ color: 0xffd23a }));
+    coneMesh.position.set(0, -0.012, 0);
+
+    const shaftGeom = new CylinderGeometry(0.0035, 0.0035, 0.018, 12);
+    const shaftMesh = new Mesh(shaftGeom, new MeshBasicMaterial({ color: 0xffd23a }));
+    shaftMesh.position.set(0, 0.009, 0);
+
+    this.level1Cue.add(coneMesh, shaftMesh);
+    this.level1Cue.name = 'level-1-cue';
+    this.level1Cue.visible = false;
+
     this.board.add(
       slab,
       gridLines(),
@@ -469,8 +499,17 @@ export class BoardSystem extends createSystem({
       this.pausedBanner,
       this.levelLabel,
       this.handDisc,
+      this.level1Cue,
     );
     this.boardEntity = this.world.createTransformEntity(this.board, { persistent: true });
+
+    const shelf = new Mesh(
+      new BoxGeometry(EDGE_BUTTON_WIDTH * 2 + 0.08, EDGE_BUTTON_HEIGHT + 0.016, 0.01),
+      this.boardMaterial,
+    );
+    shelf.name = 'button-shelf';
+    shelf.position.set(0, EDGE_BUTTON_Y, 0.005);
+    this.board.add(shelf);
 
     const buttonGeometry = new BoxGeometry(
       EDGE_BUTTON_WIDTH,
@@ -485,6 +524,8 @@ export class BoardSystem extends createSystem({
     );
     recenter.name = 'recenter';
     recenter.position.set(-0.07, EDGE_BUTTON_Y, 0.012);
+    recenter.addEventListener('click', () => this.recenter());
+    recenter.addEventListener('pointerdown', () => this.recenter());
     const recenterEntity = this.world.createTransformEntity(recenter, {
       parent: this.boardEntity,
     });
@@ -497,6 +538,8 @@ export class BoardSystem extends createSystem({
     const hand = new Mesh(buttonGeometry, this.handMaterial);
     hand.name = 'hand-mirror';
     hand.position.set(0.07, EDGE_BUTTON_Y, 0.012);
+    hand.addEventListener('click', () => this.toggleHandMirror());
+    hand.addEventListener('pointerdown', () => this.toggleHandMirror());
     const handEntity = this.world.createTransformEntity(hand, { parent: this.boardEntity });
     handEntity.addComponent(PokeInteractable);
     handEntity.addComponent(HandMirrorButton);
@@ -535,6 +578,8 @@ export class BoardSystem extends createSystem({
   }
 
   private clearLevel(): void {
+    this.pinchHeldPiece = null;
+    this.pinchHand = null;
     const grab = this.world.getSystem(GrabSystem);
     for (const piece of this.pieces) {
       if (piece.entity) {
@@ -580,12 +625,10 @@ export class BoardSystem extends createSystem({
       pad.name = 'pad';
       pad.rotation.x = Math.PI / 2;
       group.add(pad);
-      if (movablePieces(this.level).length === 1) {
-        const reach = new Mesh(soloReachGeometry, reachMaterial);
-        reach.name = 'reach';
-        reach.rotation.x = Math.PI / 2;
-        group.add(reach);
-      }
+      const reach = new Mesh(soloReachGeometry, reachMaterial);
+      reach.name = 'reach';
+      reach.rotation.x = Math.PI / 2;
+      group.add(reach);
       const highlight = new Mesh(highlightGeometry, highlightMaterial);
       highlight.name = 'grabbed';
       highlight.rotation.x = Math.PI / 2;
@@ -767,22 +810,59 @@ export class BoardSystem extends createSystem({
       const highlight = piece.object.getObjectByName('grabbed');
       if (highlight) {
         highlight.visible =
-          piece.entity?.hasComponent(Grabbed) === true || piece === this.hookHeld;
+          piece.entity?.hasComponent(Grabbed) === true ||
+          piece === this.pinchHeldPiece ||
+          piece === this.hookHeld;
       }
     }
-    if (!this.handSpec) {
+    if (this.handEnabled) {
+      this.handDisc.visible = true;
+      if (this.handSpec) {
+        this.handDisc.position.set(this.handSpec.x, this.handSpec.y, 0.024);
+        this.handDisc.rotation.z = (this.handSpec.dir * Math.PI) / 180;
+      } else if (this.lastPalm) {
+        this.handDisc.position.set(this.lastPalm.x, this.lastPalm.y, 0.024);
+        this.handDisc.rotation.z = Math.PI / 4;
+      } else {
+        this.handDisc.position.set(0.08, -0.06, 0.024);
+        this.handDisc.rotation.z = Math.PI / 4;
+      }
+    } else {
       this.handDisc.visible = false;
+    }
+  }
+
+  private updateLevel1Cue(delta: number): void {
+    if (this.levelIndex !== 0 || this.won || this.paused) {
+      this.level1Cue.visible = false;
       return;
     }
-    this.handDisc.visible = true;
-    this.handDisc.position.set(this.handSpec.x, this.handSpec.y, 0.024);
-    this.handDisc.rotation.z = (this.handSpec.dir * Math.PI) / 180;
+    const piece = this.pieces.find((p) => p.movable);
+    if (!piece) {
+      this.level1Cue.visible = false;
+      return;
+    }
+    const isGrabbed =
+      piece.entity?.hasComponent(Grabbed) === true ||
+      piece === this.pinchHeldPiece ||
+      piece === this.hookHeld;
+    if (isGrabbed || pieceDegrees(piece) !== 0) {
+      this.level1Cue.visible = false;
+      return;
+    }
+    this.cueAnim += delta;
+    this.level1Cue.visible = true;
+    const center = cellCenter(piece.col, piece.row);
+    const bob = Math.sin(this.cueAnim * 3.5) * 0.006;
+    this.level1Cue.position.set(center.x, center.y + 0.046 + bob, 0.035);
   }
 
   private endTwist(): void {
     this.twisting = false;
     this.tipReady = false;
     this.active = null;
+    this.pinchHeldPiece = null;
+    this.pinchHand = null;
   }
 
   private grabbedPiece(): LivePiece | null {
@@ -792,21 +872,67 @@ export class BoardSystem extends createSystem({
     return null;
   }
 
+  private findNearestMovablePiece(hand: 'left' | 'right'): LivePiece | null {
+    const grip = this.player.gripSpaces[hand];
+    grip.updateWorldMatrix(true, false);
+    this.scratch.setFromMatrixPosition(grip.matrixWorld);
+
+    let best: LivePiece | null = null;
+    let bestDist = GENEROUS_GRAB_RADIUS;
+
+    for (const piece of this.pieces) {
+      if (!piece.movable) continue;
+      piece.object.updateWorldMatrix(true, false);
+      this.local.setFromMatrixPosition(piece.object.matrixWorld);
+      const dist = this.scratch.distanceTo(this.local);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = piece;
+      }
+    }
+    return best;
+  }
+
+  private getActiveGrab(): { piece: LivePiece; hand: 'left' | 'right' } | null {
+    const grabbed = this.grabbedPiece();
+    if (grabbed?.entity) {
+      const hand = this.world.getSystem(GrabSystem)?.getHolderHand(grabbed.entity);
+      if ((hand === 'left' || hand === 'right') && this.input.xr.isPrimary('hand', hand)) {
+        return { piece: grabbed, hand };
+      }
+    }
+    if (this.pinchHeldPiece && this.pinchHand) {
+      if (
+        this.input.xr.isPrimary('hand', this.pinchHand) &&
+        this.input.xr.getSelectState(this.pinchHand).active
+      ) {
+        return { piece: this.pinchHeldPiece, hand: this.pinchHand };
+      }
+      this.pinchHeldPiece = null;
+      this.pinchHand = null;
+    }
+    for (const hand of ['right', 'left'] as const) {
+      if (!this.input.xr.isPrimary('hand', hand)) continue;
+      const select = this.input.xr.getSelectState(hand);
+      if (select.active || select.start) {
+        const nearest = this.findNearestMovablePiece(hand);
+        if (nearest) {
+          this.pinchHeldPiece = nearest;
+          this.pinchHand = hand;
+          return { piece: nearest, hand };
+        }
+      }
+    }
+    return null;
+  }
+
   private integrateTwist(delta: number): void {
-    const piece = this.grabbedPiece();
-    if (!piece || !piece.entity) {
+    const active = this.getActiveGrab();
+    if (!active) {
       this.endTwist();
       return;
     }
-    const hand = this.world.getSystem(GrabSystem)?.getHolderHand(piece.entity);
-    if (hand !== 'left' && hand !== 'right') {
-      this.endTwist();
-      return;
-    }
-    if (!this.input.xr.isPrimary('hand', hand)) {
-      this.endTwist();
-      return;
-    }
+    const { piece, hand } = active;
     this.readBoardAxes();
     this.readQuat(this.player.gripSpaces[hand], this.gripNow);
     const tipDelta = this.tipDelta(hand, piece);
@@ -890,6 +1016,7 @@ export class BoardSystem extends createSystem({
 
   private integrateHand(): void {
     if (!this.handEnabled) {
+      this.lastPalm = null;
       if (this.handSpec) {
         this.handSpec = null;
         this.handLocked = false;
@@ -899,6 +1026,7 @@ export class BoardSystem extends createSystem({
     }
     if (this.handLocked) return;
     const palm = this.readPalm();
+    this.lastPalm = palm;
     if (!palm) {
       if (this.handSpec) {
         this.handSpec = null;
@@ -952,8 +1080,8 @@ export class BoardSystem extends createSystem({
       grip.updateWorldMatrix(true, false);
       this.scratch.setFromMatrixPosition(grip.matrixWorld);
       this.local.copy(this.scratch).applyMatrix4(this.inverse);
-      if (Math.abs(this.local.x) > BOARD_WIDTH / 2 + 0.02) continue;
-      if (Math.abs(this.local.y) > BOARD_HEIGHT / 2 + 0.02) continue;
+      if (Math.abs(this.local.x) > BOARD_WIDTH / 2 + 0.12) continue;
+      if (Math.abs(this.local.y) > BOARD_HEIGHT / 2 + 0.08) continue;
       if (this.local.z < -0.02 || this.local.z > HAND_REACH_Z) continue;
       if (Math.abs(this.local.z) >= bestZ) continue;
       this.palmNormal.set(0, 1, 0).transformDirection(grip.matrixWorld);
@@ -1193,7 +1321,7 @@ export class BoardSystem extends createSystem({
     this.hookHeld = piece;
     if (piece.entity) this.world.getSystem(GrabSystem)?.forceRelease(piece.entity);
     this.endTwist();
-    const next = wrapPi(piece.committed + Math.trunc(steps) * SNAP_STEP_RADIANS);
+    const next = angleFromStepsOrDegrees(piece.committed, steps);
     piece.committed = next;
     piece.smoothed = next;
     if (piece.type !== 'blocker') piece.object.rotation.z = next;
@@ -1204,9 +1332,11 @@ export class BoardSystem extends createSystem({
   }
 
   private hookRelease(): void {
-    const piece = this.hookHeld ?? this.grabbedPiece();
+    const piece = this.hookHeld ?? this.grabbedPiece() ?? this.pinchHeldPiece;
     if (piece?.entity) this.world.getSystem(GrabSystem)?.forceRelease(piece.entity);
     this.hookHeld = null;
+    this.pinchHeldPiece = null;
+    this.pinchHand = null;
     this.endTwist();
   }
 
@@ -1231,13 +1361,17 @@ export class BoardSystem extends createSystem({
   }
 
   private hookState() {
-    const held = this.grabbedPiece() ?? this.hookHeld;
+    const held = this.grabbedPiece() ?? this.pinchHeldPiece ?? this.hookHeld;
     return {
       level: this.levelIndex + 1,
       paused: this.paused,
       won: this.won,
       lit: this.lit.slice(),
       grabbed: held ? pieceId(held) : null,
+      handMirror: {
+        enabled: this.handEnabled,
+        visible: this.handDisc.visible,
+      },
       pieces: this.pieces.map((piece) => ({
         id: pieceId(piece),
         type: piece.type,

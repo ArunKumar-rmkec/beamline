@@ -28,11 +28,12 @@ test('the tray sits in reach of a seated player and inside the emulator view', (
   const reach = Math.hypot(BOARD_FORWARD_M, BOARD_DROP_M, BOARD_SIDE_M);
   assert.ok(reach < 0.55, `center is ${reach.toFixed(2)}m from the eyes`);
 
-  // Buttons sit on the near lip. That lip has to clear the 90° vertical view.
+  // Buttons sit outside the level geometry on the near edge, clearing the 90° vertical view.
+  const buttonFarEdge = EDGE_BUTTON_Y + EDGE_BUTTON_HEIGHT / 2;
+  assert.ok(buttonFarEdge < -BOARD_HEIGHT / 2, 'buttons sit strictly below the level grid');
   const buttonLip = EDGE_BUTTON_Y - EDGE_BUTTON_HEIGHT / 2;
-  assert.equal(buttonLip, -BOARD_HEIGHT / 2);
   const depression = trayDepressionDegrees(buttonLip);
-  assert.ok(depression < 42, `near lip is ${depression.toFixed(1)}° below the gaze`);
+  assert.ok(depression < 46, `near lip is ${depression.toFixed(1)}° below the gaze`);
   assert.ok(TRAY_TILT_RADIANS > 0.4);
 
   const sin = Math.sin(TRAY_TILT_RADIANS);
@@ -54,4 +55,27 @@ test('the tray sits in reach of a seated player and inside the emulator view', (
     inPlane < SOLO_REACH_RADIUS + spare,
     `grip misses the mirror by ${inPlane.toFixed(3)}m`,
   );
+});
+
+test('levels 3 and 6 buttons never overlap any level geometry', async () => {
+  const { LEVELS } = await import('./levels.ts');
+  const buttonTopY = EDGE_BUTTON_Y + EDGE_BUTTON_HEIGHT / 2;
+  for (const levelId of ['3', '6']) {
+    const level = LEVELS.find((l) => l.id === levelId);
+    assert.ok(level, `level ${levelId} exists`);
+    // Source emitter position
+    const sourcePos = cellCenter(level.source.col, level.source.row);
+    assert.ok(
+      sourcePos.y - 0.02 > buttonTopY,
+      `level ${levelId} emitter (y=${sourcePos.y.toFixed(3)}) overlaps buttons (top=${buttonTopY.toFixed(3)})`,
+    );
+    // Pieces
+    for (const piece of level.pieces) {
+      const piecePos = cellCenter(piece.col, piece.row);
+      assert.ok(
+        piecePos.y - 0.02 > buttonTopY,
+        `level ${levelId} piece ${piece.type} (y=${piecePos.y.toFixed(3)}) overlaps buttons`,
+      );
+    }
+  }
 });

@@ -59,3 +59,22 @@ test('the stronger twist wins and nearest snap restores a saved angle', () => {
   assert.equal(nearestSnap(46 * DEG), 45 * DEG);
   assert.ok(Math.abs(wrapPi(Math.PI * 3) - Math.PI) < 1e-9 || Math.abs(wrapPi(Math.PI * 3) + Math.PI) < 1e-9);
 });
+
+test('positive rotate(+15) and rotate(1) rotate positive, negative rotates negative', async () => {
+  const { angleFromStepsOrDegrees } = await import('./snap.ts');
+  const toDegrees = (rad: number) => Math.round((rad * 180) / Math.PI);
+
+  // Degrees input
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, 15)), 15);
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, +15)), 15);
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, -15)), -15);
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, 30)), 30);
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, -45)), -45);
+
+  // Step counts input
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, 1)), 15);
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, +1)), 15);
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, -1)), -15);
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, 2)), 30);
+  assert.equal(toDegrees(angleFromStepsOrDegrees(0, 3)), 45);
+});

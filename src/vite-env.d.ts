@@ -21,6 +21,7 @@ interface BeamlineTestApi {
   state(): {
     level: number;
     paused: boolean;
+    inputSettled: boolean;
     won: boolean;
     lit: boolean[];
     grabbed: string | null;

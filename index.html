@@ -15,7 +15,37 @@
         height: 100%;
         background: #000;
       }
+      #enter-xr,
+      #webxr-unavailable {
+        position: fixed;
+        z-index: 100000;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        font: 600 18px system-ui, sans-serif;
+      }
+      #enter-xr {
+        color: #fff;
+        background: #2d7ff9;
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 22px;
+        cursor: pointer;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      }
+      #webxr-unavailable {
+        margin: 0;
+        color: #1b1404;
+        background: #f0b429;
+        border-radius: 12px;
+        padding: 12px 18px;
+      }
+      #enter-xr[hidden],
+      #webxr-unavailable[hidden] {
+        display: none;
+      }
     </style>
+    <link rel="icon" href="%BASE_URL%favicon.svg" type="image/svg+xml" />
   </head>
   <body>
     <div id="scene-container"></div>

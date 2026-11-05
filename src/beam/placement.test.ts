@@ -7,7 +7,9 @@ import {
   BOARD_SIDE_M,
   EDGE_BUTTON_HEIGHT,
   EDGE_BUTTON_Y,
+  SOLO_REACH_RADIUS,
   TRAY_TILT_RADIANS,
+  cellCenter,
   trayDepressionDegrees,
 } from './level.ts';
 
@@ -21,7 +23,7 @@ const RIGHT_GRIP = { x: 0.279, y: -0.098, z: -0.355 };
 test('the tray sits in reach of a seated player and inside the emulator view', () => {
   assert.ok(BOARD_FORWARD_M >= 0.35 && BOARD_FORWARD_M <= 0.45);
   assert.ok(BOARD_DROP_M >= 0.15 && BOARD_DROP_M <= 0.25);
-  assert.ok(BOARD_SIDE_M > 0 && BOARD_SIDE_M < 0.3);
+  assert.equal(BOARD_SIDE_M, 0);
 
   const reach = Math.hypot(BOARD_FORWARD_M, BOARD_DROP_M, BOARD_SIDE_M);
   assert.ok(reach < 0.55, `center is ${reach.toFixed(2)}m from the eyes`);
@@ -37,10 +39,10 @@ test('the tray sits in reach of a seated player and inside the emulator view', (
   const cos = Math.cos(TRAY_TILT_RADIANS);
   const normalY = cos;
   const normalZ = sin;
-  // Level 1 mirror is 3.3cm left of the board center, on the surface.
-  const mirrorX = BOARD_SIDE_M - 0.033;
-  const mirrorY = -BOARD_DROP_M + 0.02 * normalY;
-  const mirrorZ = -BOARD_FORWARD_M + 0.02 * normalZ;
+  const mirror = cellCenter(2, 2);
+  const mirrorX = BOARD_SIDE_M + mirror.x;
+  const mirrorY = -BOARD_DROP_M + mirror.y * sin + 0.02 * normalY;
+  const mirrorZ = -BOARD_FORWARD_M - mirror.y * cos + 0.02 * normalZ;
   const ox = RIGHT_GRIP.x - mirrorX;
   const oy = RIGHT_GRIP.y - mirrorY;
   const oz = RIGHT_GRIP.z - mirrorZ;
@@ -49,7 +51,7 @@ test('the tray sits in reach of a seated player and inside the emulator view', (
   const spare = Math.sqrt(Math.max(0, 0.07 ** 2 - plane ** 2));
   assert.ok(plane > 0 && plane < 0.07, `grip is ${plane.toFixed(3)}m off the mirror`);
   assert.ok(
-    inPlane < 0.05 + spare,
-    `grip misses the mirror pad by ${inPlane.toFixed(3)}m`,
+    inPlane < SOLO_REACH_RADIUS + spare,
+    `grip misses the mirror by ${inPlane.toFixed(3)}m`,
   );
 });

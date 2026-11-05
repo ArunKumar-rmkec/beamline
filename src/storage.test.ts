@@ -41,7 +41,29 @@ test('progress stores the level and piece angles under beamline:', () => {
   assert.ok(PROGRESS_KEY.startsWith(STORAGE_PREFIX));
   assert.equal(readProgress(store, 6), null);
   writeProgress(store, { level: 3, angles: [45, 15] });
+  assert.deepEqual(JSON.parse(store.values.get(PROGRESS_KEY)!), {
+    v: 1,
+    level: 4,
+    angles: [45, 15],
+  });
   assert.deepEqual(readProgress(store, 6), { level: 3, angles: [45, 15] });
+});
+
+test('a level change is stored as the 1-based level the player sees', () => {
+  const store = memoryStore();
+  writeProgress(store, { level: 1, angles: [0, 0] });
+  assert.deepEqual(JSON.parse(store.values.get(PROGRESS_KEY)!), {
+    v: 1,
+    level: 2,
+    angles: [0, 0],
+  });
+  assert.deepEqual(readProgress(store, 6), { level: 1, angles: [0, 0] });
+});
+
+test('a legacy 0-based progress save still loads', () => {
+  const store = memoryStore();
+  store.values.set(PROGRESS_KEY, JSON.stringify({ level: 1, angles: [0, 0] }));
+  assert.deepEqual(readProgress(store, 6), { level: 1, angles: [0, 0] });
 });
 
 test('a slice 1 mirror angle migrates onto level 1', () => {

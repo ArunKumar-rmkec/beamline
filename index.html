@@ -13,13 +13,42 @@
       #scene-container {
         margin: 0;
         height: 100%;
-        background: #000;
+        background: #1c2836;
+      }
+      #desktop-intro {
+        position: fixed;
+        z-index: 100000;
+        top: 18px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(92vw, 640px);
+        margin: 0;
+        text-align: center;
+        color: #f4f7fb;
+        font-family: system-ui, sans-serif;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+        pointer-events: none;
+      }
+      #desktop-intro h1 {
+        margin: 0;
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+      }
+      #desktop-intro p {
+        margin: 8px 0 0;
+        font-size: 16px;
+        font-weight: 600;
+        line-height: 1.35;
+      }
+      #desktop-intro[hidden] {
+        display: none;
       }
       #enter-xr,
       #webxr-unavailable {
         position: fixed;
         z-index: 100000;
-        top: 20px;
+        top: 108px;
         left: 50%;
         transform: translateX(-50%);
         font: 600 18px system-ui, sans-serif;
@@ -49,6 +78,10 @@
   </head>
   <body>
     <div id="scene-container"></div>
+    <div id="desktop-intro">
+      <h1>Beamline</h1>
+      <p>Click Enter XR — works in the built-in emulator, no headset needed</p>
+    </div>
     <script type="module" src="/src/index.ts"></script>
   </body>
 </html>

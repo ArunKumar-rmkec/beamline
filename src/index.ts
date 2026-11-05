@@ -21,6 +21,7 @@ async function installDesktopXRChrome(world: World): Promise<void> {
   const button = ensureEnterButton();
   const onSessionStart = () => {
     button.hidden = true;
+    setIntroVisible(false);
     hideUnavailable();
   };
   const onSessionEnd = () => {
@@ -48,16 +49,24 @@ async function syncChrome(
 ): Promise<void> {
   if (world.renderer.xr.isPresenting) {
     button.hidden = true;
+    setIntroVisible(false);
     hideUnavailable();
     return;
   }
   if (await immersiveSupported()) {
     hideUnavailable();
     button.hidden = false;
+    setIntroVisible(true);
     return;
   }
   button.hidden = true;
+  setIntroVisible(false);
   showUnavailable(world);
+}
+
+function setIntroVisible(visible: boolean): void {
+  const intro = document.getElementById('desktop-intro');
+  if (intro instanceof HTMLElement) intro.hidden = !visible;
 }
 
 function ensureEnterButton(): HTMLButtonElement {

@@ -5,8 +5,8 @@ import {
   CanvasTexture,
   CylinderGeometry,
   DoubleSide,
-  Float32BufferAttribute,
   Entity,
+  Float32BufferAttribute,
   Grabbed,
   GrabSystem,
   Group,
@@ -28,23 +28,32 @@ import {
   VisibilityState,
   createSystem,
 } from '@iwsdk/core';
+import { BoardAudio } from './audio.js';
 import {
   BOARD_DROP_M,
   BOARD_FORWARD_M,
   BOARD_HEIGHT,
   BOARD_WIDTH,
+  BLOCKER_HALF_HEIGHT,
+  BLOCKER_HALF_WIDTH,
   GRID_COLS,
   GRID_ROWS,
   MIRROR_HALF_LENGTH,
-  MIRROR_POSITION,
-  SOURCE_POSITION,
-  TARGET_POSITION,
   TARGET_RADIUS,
-  levelBoard,
+  TRAY_TILT_RADIANS,
+  cellCenter,
 } from './beam/level.js';
 import {
+  LEVELS,
+  boardFromLevel,
+  movablePieces,
+  type LevelDef,
+  type LevelPiece,
+  type PieceType,
+} from './beam/levels.js';
+import { palmOutgoingDegrees } from './beam/palm.js';
+import {
   chooseTwistDelta,
-  nearestSnap,
   signedTwist,
   smoothAngle,
   snapWithHysteresis,
@@ -52,12 +61,16 @@ import {
   type Quat,
   type Vec3,
 } from './beam/snap.js';
-import { solveBeam, type BeamSegment } from './beam/solver.js';
-import { RecenterButton } from './components.js';
-import { readMirrorDegrees, writeMirrorDegrees } from './storage.js';
+import { solveBeam, type BeamHand, type BeamSegment } from './beam/solver.js';
+import { HandMirrorButton, RecenterButton } from './components.js';
+import { readHandMirror, readProgress, writeHandMirror, writeProgress } from './storage.js';
 
-const MIRROR_Z = 0.02;
+const PIECE_Z = 0.02;
 const BEAM_Z = 0.018;
+const WIN_HOLD = 3.2;
+const HAND_REACH_Z = 0.16;
+const HAND_CATCH = 0.04;
+const HAND_RADIUS = 0.03;
 /** A single-frame jump larger than this is a tracking loss, not a wrist. */
 const TRACKING_JUMP = (40 * Math.PI) / 180;
 const TIP_DEAD_ZONE = 0.025;
@@ -71,6 +84,87 @@ const glowMaterial = new MeshBasicMaterial({
   blending: AdditiveBlending,
   depthWrite: false,
 });
+const grabGeometry = new CylinderGeometry(0.05, 0.05, 0.012, 24);
+const grabMaterial = new MeshStandardMaterial({
+  color: 0xd5e4f5,
+  transparent: true,
+  opacity: 0.34,
+  roughness: 0.35,
+  metalness: 0.05,
+  depthWrite: false,
+});
+const mirrorGeometry = new BoxGeometry(MIRROR_HALF_LENGTH * 2, 0.01, 0.016);
+const mirrorMaterial = new MeshStandardMaterial({
+  color: 0xeef3f8,
+  metalness: 0.88,
+  roughness: 0.16,
+  emissive: 0xb7c9de,
+  emissiveIntensity: 0.45,
+});
+const prismGeometry = new CylinderGeometry(0.004, 0.03, 0.016, 3);
+const prismMaterial = new MeshStandardMaterial({
+  color: 0x9ee7ff,
+  emissive: 0x2aa4c8,
+  emissiveIntensity: 0.7,
+  roughness: 0.15,
+  metalness: 0.2,
+  transparent: true,
+  opacity: 0.88,
+});
+const blockerGeometry = new BoxGeometry(
+  BLOCKER_HALF_WIDTH * 2,
+  BLOCKER_HALF_HEIGHT * 2,
+  0.046,
+);
+const blockerMaterial = new MeshStandardMaterial({
+  color: 0x2a241f,
+  roughness: 0.84,
+  metalness: 0.04,
+  emissive: 0x120e0c,
+  emissiveIntensity: 0.3,
+});
+const sourceGeometry = new CylinderGeometry(0.012, 0.016, 0.04, 12);
+const sourceMaterial = new MeshStandardMaterial({
+  color: 0xff3355,
+  emissive: 0xff2244,
+  emissiveIntensity: 1.5,
+  roughness: 0.35,
+});
+const targetGeometry = new OctahedronGeometry(TARGET_RADIUS, 0);
+const sparkGeometry = new OctahedronGeometry(0.008, 0);
+const sparkMaterial = new MeshBasicMaterial({
+  color: 0xffd27a,
+  transparent: true,
+  opacity: 0.9,
+  blending: AdditiveBlending,
+  depthWrite: false,
+});
+const handDiscMaterial = new MeshBasicMaterial({
+  color: 0xd7fff0,
+  transparent: true,
+  opacity: 0.4,
+  depthWrite: false,
+  side: DoubleSide,
+});
+
+interface LivePiece {
+  type: PieceType;
+  col: number;
+  row: number;
+  movable: boolean;
+  object: Group;
+  entity: Entity | null;
+  committed: number;
+  smoothed: number;
+}
+
+interface Spark {
+  mesh: Mesh;
+  vx: number;
+  vy: number;
+  vz: number;
+  life: number;
+}
 
 function labelTexture(text: string, fill: string, ink: string): CanvasTexture {
   const canvas = document.createElement('canvas');
@@ -81,7 +175,7 @@ function labelTexture(text: string, fill: string, ink: string): CanvasTexture {
     context.fillStyle = fill;
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = ink;
-    context.font = 'bold 72px sans-serif';
+    context.font = 'bold 64px sans-serif';
     context.textAlign = 'center';
     context.textBaseline = 'middle';
     context.fillText(text, 128, 68);
@@ -106,100 +200,171 @@ function gridLines(): LineSegments {
   }
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
-  return new LineSegments(
-    geometry,
-    new LineBasicMaterial({ color: 0x9ec3d6 }),
-  );
+  return new LineSegments(geometry, new LineBasicMaterial({ color: 0x9ec3d6 }));
+}
+
+function nearestIncoming(
+  segments: readonly BeamSegment[],
+  x: number,
+  y: number,
+  maxDistance: number,
+): { x: number; y: number } | null {
+  let best = maxDistance;
+  let found: { x: number; y: number } | null = null;
+  for (const segment of segments) {
+    const dx = segment.x1 - segment.x0;
+    const dy = segment.y1 - segment.y0;
+    const length2 = dx * dx + dy * dy;
+    if (length2 < 1e-8) continue;
+    const raw = ((x - segment.x0) * dx + (y - segment.y0) * dy) / length2;
+    const t = Math.max(0, Math.min(1, raw));
+    const px = segment.x0 + dx * t;
+    const py = segment.y0 + dy * t;
+    const distance = Math.hypot(x - px, y - py);
+    if (distance < best) {
+      best = distance;
+      found = { x: dx, y: dy };
+    }
+  }
+  return found;
+}
+
+function pieceDegrees(piece: LivePiece): number {
+  return Math.round((wrapPi(piece.committed) * 180) / Math.PI);
 }
 
 /**
- * One seated board: a source, a pinch-to-twist mirror, and a target.
- * Placement follows the head. The mirror angle is the only saved state.
+ * Seated board. Pieces come from the current level. Mirrors and prisms
+ * pinch-twist in 15° steps. Blockers stay put. Every target has to be lit.
  */
 export class BoardSystem extends createSystem({
   recenterPressed: { required: [RecenterButton, Pressed] },
+  handPressed: { required: [HandMirrorButton, Pressed] },
 }) {
   private readonly board = new Group();
-  private mirror = new Group();
-  private mirrorEntity: Entity | null = null;
-  private target!: Mesh;
-  private targetMaterial!: MeshStandardMaterial;
-  private boardMaterial!: MeshStandardMaterial;
-  private banner!: Mesh;
-  private beamGroup = new Group();
+  private readonly beamGroup = new Group();
+  private readonly sparkGroup = new Group();
+  private readonly handDisc = new Group();
+  private readonly audio = new BoardAudio();
+  private readonly beams: Array<{ glow: Mesh; core: Mesh }> = [];
+  private readonly sparks: Spark[] = [];
+  private readonly pieces: LivePiece[] = [];
+  private readonly targets: Mesh[] = [];
 
-  private committed = 0;
-  private smoothed = 0;
+  private boardEntity: Entity | null = null;
+  private boardMaterial!: MeshStandardMaterial;
+  private handMaterial!: MeshStandardMaterial;
+  private banner!: Mesh;
+  private pausedBanner!: Mesh;
+  private levelLabel!: Mesh;
+  private sourceMesh: Mesh | null = null;
+  private level: LevelDef = LEVELS[0] ?? {
+    id: '1',
+    par: 1,
+    solution: [],
+    source: { col: 0, row: 0, dir: 0 },
+    pieces: [],
+    targets: [],
+  };
+  private levelIndex = 0;
+
   private twisting = false;
+  private active: LivePiece | null = null;
   private startAngle = 0;
   private startTip = 0;
   private tipReady = false;
   private readonly startGrip: Quat = { x: 0, y: 0, z: 0, w: 1 };
+  private readonly gripNow: Quat = { x: 0, y: 0, z: 0, w: 1 };
+
   private paused = false;
-  private sawImmersive = false;
+  private docHidden = false;
+  private xrState: VisibilityState = VisibilityState.NonImmersive;
   private needsPlace = true;
   private won = false;
+  private winPlayed = false;
+  private winHold = 0;
   private anim = 0;
-  private renderedAngle = Number.NaN;
+  private beamKey = '';
+  private handEnabled = false;
+  private handLocked = false;
+  private handSpec: BeamHand | null = null;
 
   private readonly headPos = new Vector3();
   private readonly forward = new Vector3();
   private readonly boardPos = new Vector3();
-  private readonly toHead = new Vector3();
-  private readonly worldUp = new Vector3(0, 1, 0);
   private readonly xAxis = new Vector3();
   private readonly yAxis = new Vector3();
+  private readonly boardNormal = new Vector3();
   private readonly scratch = new Vector3();
-  private readonly mirrorPos = new Vector3();
+  private readonly local = new Vector3();
+  private readonly palmNormal = new Vector3();
   private readonly scratchQuat = new Quaternion();
   private readonly basis = new Matrix4();
+  private readonly inverse = new Matrix4();
   private readonly normal: Vec3 = { x: 0, y: 0, z: 1 };
-  private readonly gripNow: Quat = { x: 0, y: 0, z: 0, w: 1 };
 
   init(): void {
-    const stored = readMirrorDegrees(localStorage, 0);
-    this.committed = nearestSnap((stored * Math.PI) / 180);
-    this.smoothed = this.committed;
-    this.buildBoard();
-    this.syncBeam();
-
+    const saved = readProgress(localStorage, LEVELS.length);
+    this.handEnabled = readHandMirror(localStorage);
+    this.levelIndex = saved?.level ?? 0;
+    this.buildStatic();
+    this.loadLevel(this.levelIndex, saved?.angles ?? null);
     this.queries.recenterPressed.subscribe('qualify', () => {
-      this.placeBoard();
+      this.needsPlace = true;
+    });
+    this.queries.handPressed.subscribe('qualify', () => {
+      this.handEnabled = !this.handEnabled;
+      this.handLocked = false;
+      this.handSpec = null;
+      this.beamKey = '';
+      writeHandMirror(localStorage, this.handEnabled);
+      this.paintHandButton();
+      this.syncBeam();
     });
 
+    const onDocumentVisibility = () => {
+      this.docHidden = document.visibilityState === 'hidden';
+      this.applyPause();
+    };
+    document.addEventListener('visibilitychange', onDocumentVisibility);
+    const resumeAudio = () => this.audio.resume();
+    window.addEventListener('pointerdown', resumeAudio);
     this.cleanupFuncs.push(
       this.visibilityState.subscribe((state) => {
-        this.paused =
-          state === VisibilityState.Hidden ||
-          state === VisibilityState.VisibleBlurred;
-        if (this.paused) this.endTwist();
-        if (state === VisibilityState.Visible && !this.sawImmersive) {
-          this.sawImmersive = true;
+        this.xrState = state;
+        if (state === VisibilityState.Visible || state === VisibilityState.NonImmersive) {
           this.needsPlace = true;
-        } else if (state === VisibilityState.NonImmersive) {
-          this.sawImmersive = false;
-          this.needsPlace = true;
-          this.endTwist();
         }
+        if (state === VisibilityState.NonImmersive) {
+          this.endTwist();
+          this.audio.suspend();
+          this.save();
+        }
+        if (state === VisibilityState.Visible) this.audio.resume();
+        this.applyPause();
       }),
+      () => document.removeEventListener('visibilitychange', onDocumentVisibility),
+      () => window.removeEventListener('pointerdown', resumeAudio),
     );
+    this.xrState = this.visibilityState.value;
+    this.applyPause();
   }
 
   update(delta: number): void {
-    if (this.needsPlace) this.placeWhenHeadIsReady();
-    if (this.paused) {
-      this.endTwist();
-    } else {
+    if (this.needsPlace) this.placeWhenReady();
+    this.applyPause();
+    if (!this.paused) {
       this.integrateTwist(delta);
+      this.integrateHand();
+      this.integrateWin(delta);
+      if (this.won) this.anim += delta;
     }
-    this.mirror.rotation.set(0, 0, this.committed);
-    this.mirror.position.set(MIRROR_POSITION.x, MIRROR_POSITION.y, MIRROR_Z);
-    if (!this.paused && this.won) this.anim += delta;
-    const pulse = this.won ? 1 + 0.12 * Math.sin(this.anim * 5) : 1;
-    this.target.scale.setScalar(pulse);
+    this.layoutPieces();
+    const pulse = this.won && !this.paused ? 1 + 0.12 * Math.sin(this.anim * 5) : 1;
+    for (const target of this.targets) target.scale.setScalar(pulse);
   }
 
-  private buildBoard(): void {
+  private buildStatic(): void {
     this.board.name = 'board';
     this.boardMaterial = new MeshStandardMaterial({
       color: 0x1b2836,
@@ -208,36 +373,7 @@ export class BoardSystem extends createSystem({
       emissive: 0x0c1824,
       emissiveIntensity: 0.85,
     });
-    const slab = new Mesh(
-      new BoxGeometry(BOARD_WIDTH, BOARD_HEIGHT, 0.012),
-      this.boardMaterial,
-    );
-    slab.position.z = 0;
-
-    const source = new Mesh(
-      new CylinderGeometry(0.012, 0.016, 0.04, 16),
-      new MeshStandardMaterial({
-        color: 0xff3355,
-        emissive: 0xff2244,
-        emissiveIntensity: 1.5,
-        roughness: 0.35,
-      }),
-    );
-    source.name = 'source';
-    source.rotation.z = -Math.PI / 2;
-    source.position.set(SOURCE_POSITION.x, SOURCE_POSITION.y, MIRROR_Z);
-
-    this.targetMaterial = new MeshStandardMaterial({
-      color: 0x12383c,
-      emissive: 0x062428,
-      emissiveIntensity: 0.4,
-      roughness: 0.35,
-      metalness: 0.15,
-    });
-    this.target = new Mesh(new OctahedronGeometry(TARGET_RADIUS, 0), this.targetMaterial);
-    this.target.name = 'target';
-    this.target.position.set(TARGET_POSITION.x, TARGET_POSITION.y, 0.03);
-
+    const slab = new Mesh(new BoxGeometry(BOARD_WIDTH, BOARD_HEIGHT, 0.012), this.boardMaterial);
     this.banner = new Mesh(
       new PlaneGeometry(0.09, 0.034),
       new MeshBasicMaterial({
@@ -247,55 +383,56 @@ export class BoardSystem extends createSystem({
       }),
     );
     this.banner.name = 'win';
-    this.banner.position.set(0, BOARD_HEIGHT / 2 - 0.028, 0.02);
+    this.banner.position.set(0, BOARD_HEIGHT / 2 - 0.03, 0.03);
     this.banner.visible = false;
 
-    this.beamGroup.name = 'beam';
-    this.board.add(slab, gridLines(), source, this.target, this.beamGroup, this.banner);
-
-    const boardEntity = this.world.createTransformEntity(this.board, {
-      persistent: true,
-    });
-
-    this.mirror = new Group();
-    this.mirror.name = 'mirror';
-    const grabPad = new Mesh(
-      new CylinderGeometry(0.055, 0.055, 0.014, 28),
-      new MeshStandardMaterial({
-        color: 0xd5e4f5,
+    this.pausedBanner = new Mesh(
+      new PlaneGeometry(0.16, 0.05),
+      new MeshBasicMaterial({
+        map: labelTexture('Paused', '#102033', '#f4f7fb'),
         transparent: true,
-        opacity: 0.34,
-        roughness: 0.35,
-        metalness: 0.05,
-        depthWrite: false,
+        side: DoubleSide,
       }),
     );
-    grabPad.rotation.x = Math.PI / 2;
-    const bar = new Mesh(
-      new BoxGeometry(MIRROR_HALF_LENGTH * 2, 0.01, 0.018),
-      new MeshStandardMaterial({
-        color: 0xeef3f8,
-        metalness: 0.88,
-        roughness: 0.16,
-        emissive: 0xb7c9de,
-        emissiveIntensity: 0.45,
-      }),
+    this.pausedBanner.name = 'paused';
+    this.pausedBanner.position.set(0, 0, 0.06);
+    this.pausedBanner.visible = false;
+
+    this.levelLabel = new Mesh(
+      new PlaneGeometry(0.04, 0.028),
+      new MeshBasicMaterial({ transparent: true, side: DoubleSide }),
     );
-    this.mirror.add(grabPad, bar);
-    this.mirror.position.set(MIRROR_POSITION.x, MIRROR_POSITION.y, MIRROR_Z);
-    this.mirror.rotation.z = this.committed;
+    this.levelLabel.position.set(-BOARD_WIDTH / 2 + 0.03, BOARD_HEIGHT / 2 - 0.028, 0.02);
 
-    const mirrorEntity = this.world.createTransformEntity(this.mirror, {
-      parent: boardEntity,
-    });
-    mirrorEntity.addComponent(OneHandGrabbable, {
-      rotate: false,
-      translate: false,
-    });
-    this.mirrorEntity = mirrorEntity;
+    const disc = new Mesh(grabGeometry, handDiscMaterial);
+    disc.rotation.x = Math.PI / 2;
+    const tick = new Mesh(mirrorGeometry, handDiscMaterial);
+    tick.scale.set(0.55, 0.45, 0.4);
+    this.handDisc.add(disc, tick);
+    this.handDisc.visible = false;
 
-    const button = new Mesh(
-      new BoxGeometry(0.05, 0.038, 0.014),
+    this.beamGroup.name = 'beam';
+    this.sparkGroup.name = 'sparks';
+    for (let index = 0; index < 12; index += 1) {
+      const mesh = new Mesh(sparkGeometry, sparkMaterial);
+      mesh.visible = false;
+      this.sparkGroup.add(mesh);
+      this.sparks.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0 });
+    }
+    this.board.add(
+      slab,
+      gridLines(),
+      this.beamGroup,
+      this.sparkGroup,
+      this.banner,
+      this.pausedBanner,
+      this.levelLabel,
+      this.handDisc,
+    );
+    this.boardEntity = this.world.createTransformEntity(this.board, { persistent: true });
+
+    const recenter = new Mesh(
+      new BoxGeometry(0.055, 0.04, 0.014),
       new MeshStandardMaterial({
         map: labelTexture('Center', '#f0b429', '#241802'),
         roughness: 0.55,
@@ -304,27 +441,207 @@ export class BoardSystem extends createSystem({
         emissiveIntensity: 0.35,
       }),
     );
-    button.name = 'recenter';
-    button.position.set(0, -BOARD_HEIGHT / 2 + 0.024, 0.014);
-    const buttonEntity = this.world.createTransformEntity(button, {
-      parent: boardEntity,
+    recenter.name = 'recenter';
+    recenter.position.set(-0.04, -BOARD_HEIGHT / 2 + 0.026, 0.016);
+    const recenterEntity = this.world.createTransformEntity(recenter, {
+      parent: this.boardEntity,
     });
-    buttonEntity.addComponent(PokeInteractable);
-    buttonEntity.addComponent(RecenterButton);
+    recenterEntity.addComponent(PokeInteractable);
+    recenterEntity.addComponent(RecenterButton);
+
+    this.handMaterial = new MeshStandardMaterial({
+      map: labelTexture('Hand', '#d7fff0', '#06241a'),
+      roughness: 0.5,
+      metalness: 0.05,
+      emissive: 0x1a3348,
+      emissiveIntensity: 0.4,
+    });
+    const hand = new Mesh(new BoxGeometry(0.055, 0.04, 0.014), this.handMaterial);
+    hand.name = 'hand-mirror';
+    hand.position.set(0.05, -BOARD_HEIGHT / 2 + 0.026, 0.016);
+    const handEntity = this.world.createTransformEntity(hand, { parent: this.boardEntity });
+    handEntity.addComponent(PokeInteractable);
+    handEntity.addComponent(HandMirrorButton);
+    this.paintHandButton();
   }
 
-  private placeWhenHeadIsReady(): void {
+  private loadLevel(index: number, angles: number[] | null): void {
+    const level = LEVELS[index] ?? LEVELS[0];
+    if (!level) return;
+    this.level = level;
+    this.levelIndex = LEVELS.indexOf(level);
+    this.won = false;
+    this.winPlayed = false;
+    this.winHold = 0;
+    this.anim = 0;
+    this.handLocked = false;
+    this.handSpec = null;
+    this.beamKey = '';
+    this.endTwist();
+    this.clearLevel();
+    const usable =
+      angles && angles.length === movablePieces(level).length ? angles : null;
+    let movable = 0;
+    for (const piece of level.pieces) {
+      const degrees = piece.movable ? (usable?.[movable++] ?? piece.rot) : piece.rot;
+      this.buildPiece(piece, (degrees * Math.PI) / 180);
+    }
+    this.buildSource();
+    this.buildTargets();
+    this.paintLevel();
+    this.hideSparks();
+    this.banner.visible = false;
+    this.syncBeam();
+    this.save();
+  }
+
+  private clearLevel(): void {
+    for (const piece of this.pieces) {
+      piece.object.removeFromParent();
+      piece.entity?.removeComponent(OneHandGrabbable);
+    }
+    this.pieces.length = 0;
+    for (const target of this.targets) {
+      target.removeFromParent();
+      const material = target.material;
+      if (material instanceof MeshStandardMaterial) material.dispose();
+    }
+    this.targets.length = 0;
+    this.sourceMesh?.removeFromParent();
+    this.sourceMesh = null;
+  }
+
+  private buildPiece(piece: LevelPiece, radians: number): void {
+    const center = cellCenter(piece.col, piece.row);
+    const group = new Group();
+    group.name = piece.type;
+    if (piece.type === 'blocker') {
+      group.add(new Mesh(blockerGeometry, blockerMaterial));
+    } else if (piece.type === 'prism') {
+      const gem = new Mesh(prismGeometry, prismMaterial);
+      gem.rotation.x = Math.PI / 2;
+      group.add(gem);
+    } else {
+      group.add(new Mesh(mirrorGeometry, mirrorMaterial));
+    }
+    if (piece.movable) {
+      const pad = new Mesh(grabGeometry, grabMaterial);
+      pad.rotation.x = Math.PI / 2;
+      group.add(pad);
+    }
+    group.position.set(center.x, center.y, piece.type === 'blocker' ? 0.03 : PIECE_Z);
+    if (piece.type !== 'blocker') group.rotation.z = radians;
+    this.board.add(group);
+
+    let entity: Entity | null = null;
+    if (piece.movable && this.boardEntity) {
+      entity = this.world.createTransformEntity(group, { parent: this.boardEntity });
+      entity.addComponent(OneHandGrabbable, { rotate: false, translate: false });
+    }
+    this.pieces.push({
+      type: piece.type,
+      col: piece.col,
+      row: piece.row,
+      movable: piece.movable,
+      object: group,
+      entity,
+      committed: radians,
+      smoothed: radians,
+    });
+  }
+
+  private buildSource(): void {
+    const center = cellCenter(this.level.source.col, this.level.source.row);
+    const source = new Mesh(sourceGeometry, sourceMaterial);
+    source.name = 'source';
+    source.position.set(center.x, center.y, PIECE_Z);
+    source.rotation.z = -Math.PI / 2 + (this.level.source.dir * Math.PI) / 180;
+    this.board.add(source);
+    this.sourceMesh = source;
+  }
+
+  private buildTargets(): void {
+    for (const target of this.level.targets) {
+      const center = cellCenter(target.col, target.row);
+      const material = new MeshStandardMaterial({
+        color: 0x12383c,
+        emissive: 0x062428,
+        emissiveIntensity: 0.4,
+        roughness: 0.35,
+        metalness: 0.15,
+      });
+      const mesh = new Mesh(targetGeometry, material);
+      mesh.name = 'target';
+      mesh.position.set(center.x, center.y, 0.03);
+      this.board.add(mesh);
+      this.targets.push(mesh);
+    }
+  }
+
+  private paintLevel(): void {
+    const material = this.levelLabel.material;
+    if (!(material instanceof MeshBasicMaterial)) return;
+    material.map?.dispose();
+    material.map = labelTexture(this.level.id, '#102033', '#d5e4f5');
+    material.needsUpdate = true;
+  }
+
+  private paintHandButton(): void {
+    this.handMaterial.emissive.setHex(this.handEnabled ? 0x1d6a4a : 0x1a3348);
+    this.handMaterial.emissiveIntensity = this.handEnabled ? 0.8 : 0.4;
+  }
+
+  private paintTarget(index: number, lit: boolean): void {
+    const mesh = this.targets[index];
+    if (!mesh) return;
+    const material = mesh.material;
+    if (!(material instanceof MeshStandardMaterial)) return;
+    if (lit) {
+      material.color.setHex(0xfff6d4);
+      material.emissive.setHex(0xffc14a);
+      material.emissiveIntensity = 2.4;
+      return;
+    }
+    material.color.setHex(0x12383c);
+    material.emissive.setHex(0x062428);
+    material.emissiveIntensity = 0.4;
+  }
+
+  private simPaused(): boolean {
+    return (
+      this.docHidden ||
+      this.xrState === VisibilityState.Hidden ||
+      this.xrState === VisibilityState.VisibleBlurred
+    );
+  }
+
+  private applyPause(): void {
+    const paused = this.simPaused();
+    if (paused === this.paused) return;
+    this.paused = paused;
+    this.pausedBanner.visible = paused;
+    if (!paused) return;
+    this.endTwist();
+    this.audio.suspend();
+    this.save();
+  }
+
+  private placeWhenReady(): void {
+    if (
+      this.xrState !== VisibilityState.Visible &&
+      this.xrState !== VisibilityState.NonImmersive
+    ) {
+      return;
+    }
     this.player.head.updateWorldMatrix(true, false);
     this.headPos.setFromMatrixPosition(this.player.head.matrixWorld);
-    // The first immersive frames can report the head at the origin, before
-    // the viewer pose arrives. Wait for an eye-height pose so the board
-    // does not spawn under the floor.
-    if (this.sawImmersive && this.headPos.y < 0.75) return;
-    this.placeBoard();
+    // The first immersive frames can report the head at the origin.
+    if (this.xrState === VisibilityState.Visible && this.headPos.y < 0.75) return;
+    this.placeTray();
     this.needsPlace = false;
   }
 
-  private placeBoard(): void {
+  private placeTray(): void {
     const head = this.player.head;
     head.updateWorldMatrix(true, false);
     this.headPos.setFromMatrixPosition(head.matrixWorld);
@@ -334,32 +651,58 @@ export class BoardSystem extends createSystem({
     this.forward.normalize();
     this.boardPos.copy(this.headPos).addScaledVector(this.forward, BOARD_FORWARD_M);
     this.boardPos.y -= BOARD_DROP_M;
-    this.toHead.copy(this.headPos).sub(this.boardPos);
-    if (this.toHead.lengthSq() < 1e-6) this.toHead.set(0, 0, 1);
-    this.toHead.normalize();
-    this.xAxis.crossVectors(this.worldUp, this.toHead);
-    if (this.xAxis.lengthSq() < 1e-6) this.xAxis.set(1, 0, 0);
-    this.xAxis.normalize();
-    this.yAxis.crossVectors(this.toHead, this.xAxis).normalize();
-    this.basis.makeBasis(this.xAxis, this.yAxis, this.toHead);
-    this.board.quaternion.setFromRotationMatrix(this.basis);
+    this.orientTray(this.forward);
     this.board.position.copy(this.boardPos);
     this.board.updateWorldMatrix(true, true);
     this.endTwist();
   }
 
+  /** Far edge up, normal tipped toward the player. `forward` is horizontal. */
+  private orientTray(forward: Vector3): void {
+    const sin = Math.sin(TRAY_TILT_RADIANS);
+    const cos = Math.cos(TRAY_TILT_RADIANS);
+    this.yAxis.set(forward.x * cos, sin, forward.z * cos).normalize();
+    this.boardNormal.set(-forward.x * sin, cos, -forward.z * sin).normalize();
+    this.xAxis.crossVectors(this.yAxis, this.boardNormal).normalize();
+    this.basis.makeBasis(this.xAxis, this.yAxis, this.boardNormal);
+    this.board.quaternion.setFromRotationMatrix(this.basis);
+  }
+
+  private layoutPieces(): void {
+    for (const piece of this.pieces) {
+      const center = cellCenter(piece.col, piece.row);
+      piece.object.position.set(center.x, center.y, piece.type === 'blocker' ? 0.03 : PIECE_Z);
+      if (piece.type !== 'blocker') piece.object.rotation.set(0, 0, piece.committed);
+    }
+    if (!this.handSpec) {
+      this.handDisc.visible = false;
+      return;
+    }
+    this.handDisc.visible = true;
+    this.handDisc.position.set(this.handSpec.x, this.handSpec.y, 0.024);
+    this.handDisc.rotation.z = (this.handSpec.dir * Math.PI) / 180;
+  }
+
   private endTwist(): void {
     this.twisting = false;
     this.tipReady = false;
+    this.active = null;
+  }
+
+  private grabbedPiece(): LivePiece | null {
+    for (const piece of this.pieces) {
+      if (piece.entity?.hasComponent(Grabbed)) return piece;
+    }
+    return null;
   }
 
   private integrateTwist(delta: number): void {
-    const entity = this.mirrorEntity;
-    if (!entity || !entity.hasComponent(Grabbed)) {
+    const piece = this.grabbedPiece();
+    if (!piece || !piece.entity) {
       this.endTwist();
       return;
     }
-    const hand = this.world.getSystem(GrabSystem)?.getHolderHand(entity);
+    const hand = this.world.getSystem(GrabSystem)?.getHolderHand(piece.entity);
     if (hand !== 'left' && hand !== 'right') {
       this.endTwist();
       return;
@@ -368,36 +711,32 @@ export class BoardSystem extends createSystem({
       this.endTwist();
       return;
     }
-
     this.readBoardAxes();
     this.readQuat(this.player.gripSpaces[hand], this.gripNow);
-    const tipDelta = this.tipDelta(hand);
-    if (!this.twisting) {
+    const tipDelta = this.tipDelta(hand, piece);
+    if (!this.twisting || this.active !== piece) {
       this.twisting = true;
-      this.startAngle = this.committed;
+      this.active = piece;
+      this.startAngle = piece.committed;
       this.copyQuat(this.gripNow, this.startGrip);
-      this.smoothed = this.committed;
+      piece.smoothed = piece.committed;
       return;
     }
-
     const gripDelta = signedTwist(this.startGrip, this.gripNow, this.normal);
     let twist = chooseTwistDelta(tipDelta, gripDelta);
     if (Math.abs(twist) > TRACKING_JUMP) {
-      this.startAngle = this.committed;
+      this.startAngle = piece.committed;
       this.tipReady = false;
       this.copyQuat(this.gripNow, this.startGrip);
-      this.smoothed = this.committed;
+      piece.smoothed = piece.committed;
       twist = 0;
     }
-    const raw = this.startAngle + twist;
-    this.smoothed = smoothAngle(this.smoothed, raw, delta);
-    const next = snapWithHysteresis(this.smoothed, this.committed);
-    if (next === this.committed) return;
-    this.committed = next;
-    writeMirrorDegrees(
-      localStorage,
-      (nearestSnap(wrapPi(this.committed)) * 180) / Math.PI,
-    );
+    piece.smoothed = smoothAngle(piece.smoothed, this.startAngle + twist, delta);
+    const next = snapWithHysteresis(piece.smoothed, piece.committed);
+    if (next === piece.committed) return;
+    piece.committed = next;
+    this.audio.tick();
+    this.save();
     this.syncBeam();
   }
 
@@ -416,14 +755,13 @@ export class BoardSystem extends createSystem({
     this.normal.z = this.scratch.z;
   }
 
-  /** Orbit of the index tip around the mirror, or 0 when the finger is on top of it. */
-  private tipDelta(hand: 'left' | 'right'): number {
+  private tipDelta(hand: 'left' | 'right', piece: LivePiece): number {
     const tip = this.player.indexTipSpaces[hand];
     tip.updateWorldMatrix(true, false);
-    this.mirror.updateWorldMatrix(true, false);
+    piece.object.updateWorldMatrix(true, false);
     this.scratch.setFromMatrixPosition(tip.matrixWorld);
-    this.mirrorPos.setFromMatrixPosition(this.mirror.matrixWorld);
-    this.scratch.sub(this.mirrorPos);
+    this.local.setFromMatrixPosition(piece.object.matrixWorld);
+    this.scratch.sub(this.local);
     const right = this.xAxis.set(1, 0, 0).transformDirection(this.board.matrixWorld);
     const up = this.yAxis.set(0, 1, 0).transformDirection(this.board.matrixWorld);
     const x = this.scratch.dot(right);
@@ -450,53 +788,205 @@ export class BoardSystem extends createSystem({
     out.w = this.scratchQuat.w;
   }
 
+  private angleList(): number[] {
+    return this.pieces.filter((piece) => piece.movable).map((piece) => pieceDegrees(piece));
+  }
+
+  private integrateHand(): void {
+    if (!this.handEnabled) {
+      if (this.handSpec) {
+        this.handSpec = null;
+        this.handLocked = false;
+        this.syncBeam();
+      }
+      return;
+    }
+    if (this.handLocked) return;
+    const palm = this.readPalm();
+    if (!palm) {
+      if (this.handSpec) {
+        this.handSpec = null;
+        this.syncBeam();
+      }
+      return;
+    }
+    const angles = this.angleList();
+    const bare = solveBeam(boardFromLevel(this.level, angles));
+    const incoming = nearestIncoming(bare.segments, palm.x, palm.y, HAND_CATCH);
+    if (!incoming) {
+      if (this.handSpec) {
+        this.handSpec = null;
+        this.syncBeam();
+      }
+      return;
+    }
+    const dir = palmOutgoingDegrees(incoming.x, incoming.y, palm.nx, palm.ny, palm.nz);
+    if (dir == null) return;
+    const spec: BeamHand = {
+      x: Math.round(palm.x * 200) / 200,
+      y: Math.round(palm.y * 200) / 200,
+      radius: HAND_RADIUS,
+      dir,
+    };
+    const withHand = solveBeam(boardFromLevel(this.level, angles, spec));
+    const bareLit = bare.lit.filter(Boolean).length;
+    const nextLit = withHand.lit.filter(Boolean).length;
+    if (nextLit > bareLit) this.handLocked = true;
+    if (
+      this.handSpec &&
+      this.handSpec.x === spec.x &&
+      this.handSpec.y === spec.y &&
+      this.handSpec.dir === spec.dir
+    ) {
+      return;
+    }
+    this.handSpec = spec;
+    this.syncBeam();
+  }
+
+  /** Palm center on the board, and the palm normal in board space. Grip +Y faces out of the palm. */
+  private readPalm(): { x: number; y: number; nx: number; ny: number; nz: number } | null {
+    this.board.updateWorldMatrix(true, false);
+    this.inverse.copy(this.board.matrixWorld).invert();
+    let best: { x: number; y: number; nx: number; ny: number; nz: number } | null = null;
+    let bestZ = Number.POSITIVE_INFINITY;
+    for (const hand of ['left', 'right'] as const) {
+      if (!this.input.xr.isPrimary('hand', hand)) continue;
+      const grip = this.player.gripSpaces[hand];
+      grip.updateWorldMatrix(true, false);
+      this.scratch.setFromMatrixPosition(grip.matrixWorld);
+      this.local.copy(this.scratch).applyMatrix4(this.inverse);
+      if (Math.abs(this.local.x) > BOARD_WIDTH / 2 + 0.02) continue;
+      if (Math.abs(this.local.y) > BOARD_HEIGHT / 2 + 0.02) continue;
+      if (this.local.z < -0.02 || this.local.z > HAND_REACH_Z) continue;
+      if (Math.abs(this.local.z) >= bestZ) continue;
+      this.palmNormal.set(0, 1, 0).transformDirection(grip.matrixWorld);
+      this.palmNormal.transformDirection(this.inverse);
+      bestZ = Math.abs(this.local.z);
+      best = {
+        x: this.local.x,
+        y: this.local.y,
+        nx: this.palmNormal.x,
+        ny: this.palmNormal.y,
+        nz: this.palmNormal.z,
+      };
+    }
+    return best;
+  }
+
+  private integrateWin(delta: number): void {
+    if (!this.won) return;
+    this.stepSparks(delta);
+    if (this.levelIndex >= LEVELS.length - 1) return;
+    // A long first frame must not skip the payoff.
+    this.winHold += Math.min(delta, 0.05);
+    if (this.winHold < WIN_HOLD) return;
+    this.loadLevel(this.levelIndex + 1, null);
+  }
+
   private syncBeam(): void {
-    if (this.renderedAngle === this.committed) return;
-    this.renderedAngle = this.committed;
-    const degrees = (this.committed * 180) / Math.PI;
-    const result = solveBeam(levelBoard(degrees));
+    const angles = this.angleList();
+    const hand = this.handSpec;
+    const key = `${this.levelIndex}|${angles.join(',')}|${
+      hand ? `${hand.x.toFixed(3)}:${hand.y.toFixed(3)}:${hand.dir}` : ''
+    }`;
+    if (key === this.beamKey) return;
+    this.beamKey = key;
+    const result = solveBeam(boardFromLevel(this.level, angles, hand ?? undefined));
     this.rebuildBeam(result.segments);
-    this.setWon(result.hitTarget);
+    this.won = result.hitTarget;
+    result.lit.forEach((lit, index) => this.paintTarget(index, lit));
+    this.boardMaterial.emissive.setHex(this.won ? 0x24523a : 0x0c1824);
+    this.boardMaterial.emissiveIntensity = this.won ? 0.7 : 0.85;
+    this.banner.visible = this.won;
+    if (!this.won) {
+      this.winPlayed = false;
+      this.winHold = 0;
+      this.hideSparks();
+      return;
+    }
+    if (this.winPlayed) return;
+    this.winPlayed = true;
+    this.audio.win();
+    this.burst();
   }
 
   private rebuildBeam(segments: readonly BeamSegment[]): void {
-    for (const child of [...this.beamGroup.children]) this.beamGroup.remove(child);
+    let used = 0;
     for (const segment of segments) {
       const dx = segment.x1 - segment.x0;
       const dy = segment.y1 - segment.y0;
       const length = Math.hypot(dx, dy);
       if (length < 1e-5) continue;
+      const pair = this.beams[used] ?? this.makeBeam();
       const angle = Math.atan2(dy, dx);
-      const glow = new Mesh(beamGeometry, glowMaterial);
-      const core = new Mesh(beamGeometry, beamMaterial);
-      glow.scale.set(length, 0.016, 0.01);
-      core.scale.set(length, 0.0045, 0.0045);
       const x = (segment.x0 + segment.x1) / 2;
       const y = (segment.y0 + segment.y1) / 2;
-      glow.position.set(x, y, BEAM_Z);
-      core.position.set(x, y, BEAM_Z);
-      glow.rotation.z = angle;
-      core.rotation.z = angle;
-      this.beamGroup.add(glow, core);
+      pair.glow.visible = true;
+      pair.core.visible = true;
+      pair.glow.scale.set(length, 0.016, 0.01);
+      pair.core.scale.set(length, 0.0045, 0.0045);
+      pair.glow.position.set(x, y, BEAM_Z);
+      pair.core.position.set(x, y, BEAM_Z);
+      pair.glow.rotation.z = angle;
+      pair.core.rotation.z = angle;
+      used += 1;
+    }
+    for (let index = used; index < this.beams.length; index += 1) {
+      const pair = this.beams[index];
+      if (!pair) continue;
+      pair.glow.visible = false;
+      pair.core.visible = false;
     }
   }
 
-  private setWon(won: boolean): void {
-    this.won = won;
-    this.banner.visible = won;
-    if (won) {
-      this.targetMaterial.color.setHex(0xfff6d4);
-      this.targetMaterial.emissive.setHex(0xffc14a);
-      this.targetMaterial.emissiveIntensity = 2.4;
-      this.boardMaterial.emissive.setHex(0x24523a);
-      this.boardMaterial.emissiveIntensity = 0.7;
-      return;
+  private makeBeam(): { glow: Mesh; core: Mesh } {
+    const glow = new Mesh(beamGeometry, glowMaterial);
+    const core = new Mesh(beamGeometry, beamMaterial);
+    this.beamGroup.add(glow, core);
+    const pair = { glow, core };
+    this.beams.push(pair);
+    return pair;
+  }
+
+  private burst(): void {
+    for (const spark of this.sparks) {
+      spark.life = 0.8 + Math.random() * 0.5;
+      spark.vx = (Math.random() - 0.5) * 0.18;
+      spark.vy = 0.04 + Math.random() * 0.22;
+      spark.vz = 0.04 + Math.random() * 0.12;
+      spark.mesh.visible = true;
+      spark.mesh.position.set((Math.random() - 0.5) * 0.16, (Math.random() - 0.5) * 0.1, 0.04);
+      spark.mesh.scale.setScalar(1);
     }
-    this.targetMaterial.color.setHex(0x12383c);
-    this.targetMaterial.emissive.setHex(0x062428);
-    this.targetMaterial.emissiveIntensity = 0.4;
-      this.boardMaterial.emissive.setHex(0x0c1824);
-    this.boardMaterial.emissiveIntensity = 0.85;
-    this.target.scale.setScalar(1);
+  }
+
+  private stepSparks(delta: number): void {
+    for (const spark of this.sparks) {
+      spark.life -= delta;
+      if (spark.life <= 0) {
+        spark.life = 0.55 + Math.random() * 0.35;
+        spark.vx = (Math.random() - 0.5) * 0.16;
+        spark.vy = 0.05 + Math.random() * 0.16;
+        spark.vz = 0.03 + Math.random() * 0.08;
+        spark.mesh.position.set((Math.random() - 0.5) * 0.18, (Math.random() - 0.5) * 0.1, 0.04);
+      }
+      spark.mesh.visible = true;
+      spark.mesh.position.x += spark.vx * delta;
+      spark.mesh.position.y += spark.vy * delta;
+      spark.mesh.position.z += spark.vz * delta;
+      spark.mesh.scale.setScalar(Math.max(spark.life, 0.25));
+    }
+  }
+
+  private hideSparks(): void {
+    for (const spark of this.sparks) {
+      spark.life = 0;
+      spark.mesh.visible = false;
+    }
+  }
+
+  private save(): void {
+    writeProgress(localStorage, { level: this.levelIndex, angles: this.angleList() });
   }
 }

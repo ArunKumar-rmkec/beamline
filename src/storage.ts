@@ -10,8 +10,16 @@ export interface KeyValueStore {
 }
 
 export interface Progress {
+  /** Zero-based level index. */
   level: number;
   angles: number[];
+}
+
+/** Stored progress uses a 1-based level. `v` keeps older 0-based saves readable. */
+interface StoredProgress {
+  v?: unknown;
+  level?: unknown;
+  angles?: unknown;
 }
 
 export function readMirrorDegrees(store: KeyValueStore, fallback: number): number {
@@ -44,17 +52,16 @@ export function readProgress(store: KeyValueStore, levelCount: number): Progress
   try {
     const raw = store.getItem(PROGRESS_KEY);
     if (raw != null && raw.trim() !== '') {
-      const parsed = JSON.parse(raw) as { level?: unknown; angles?: unknown };
+      const parsed = JSON.parse(raw) as StoredProgress;
       const angles = finiteAngles(parsed.angles);
       const level = parsed.level;
-      if (
-        typeof level === 'number' &&
-        Number.isInteger(level) &&
-        level >= 0 &&
-        level < levelCount &&
-        angles
-      ) {
-        return { level, angles };
+      if (typeof level === 'number' && Number.isInteger(level) && angles) {
+        if (parsed.v === 1 && level >= 1 && level <= levelCount) {
+          return { level: level - 1, angles };
+        }
+        if (parsed.v !== 1 && level >= 0 && level < levelCount) {
+          return { level, angles };
+        }
       }
     }
   } catch {
@@ -70,7 +77,7 @@ export function writeProgress(store: KeyValueStore, progress: Progress): void {
   try {
     store.setItem(
       PROGRESS_KEY,
-      JSON.stringify({ level: progress.level, angles: progress.angles }),
+      JSON.stringify({ v: 1, level: progress.level + 1, angles: progress.angles }),
     );
   } catch {
     // The in-memory board still has the angles.

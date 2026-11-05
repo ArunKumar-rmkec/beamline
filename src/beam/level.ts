@@ -12,14 +12,21 @@ export const BLOCKER_HALF_HEIGHT = 0.024;
  * Seated placement. IWER's default hands rest about 36cm ahead and 10cm
  * below the head, and the emulator looks out with a 90° vertical view.
  * 40cm forward and 15cm down keeps the whole tray inside that view and
- * inside a seated reach on a Quest. The side shift puts the first mirror
- * under the resting right hand, so that hand can pinch it without moving.
- * The tilt faces the surface at the player.
+ * inside a seated reach on a Quest. The tray is centered on the facing
+ * direction. The tilt faces the surface at the player.
  */
 export const BOARD_FORWARD_M = 0.4;
 export const BOARD_DROP_M = 0.15;
-/** Meters to the player's right of the facing direction. */
-export const BOARD_SIDE_M = 0.28;
+/** Meters to the player's right of the facing direction. Zero keeps the tray centered. */
+export const BOARD_SIDE_M = 0;
+/** Visible pinch disc on a movable piece. */
+export const GRAB_PAD_RADIUS = 0.05;
+/**
+ * Invisible grab disc used when a level has one movable piece.
+ * A resting right hand sits about 28cm to the right of a centered mirror;
+ * this radius still meets that grip.
+ */
+export const SOLO_REACH_RADIUS = 0.27;
 /** Radians from horizontal. Far edge up, surface facing the seated player. */
 export const TRAY_TILT_RADIANS = Math.atan2(BOARD_FORWARD_M, BOARD_DROP_M);
 

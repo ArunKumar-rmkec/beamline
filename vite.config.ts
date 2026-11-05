@@ -11,7 +11,7 @@ import { defineConfig } from 'vite';
 export default defineConfig(({ command }) => ({
   // GitHub Pages serves this repo at /beamline/. Dev stays at / so the emulator opens the root.
   base: command === 'build' ? '/beamline/' : '/',
-  plugins: [iwsdkDev(), emulateOnlyWithoutNativeXR()],
+  plugins: [iwsdkDev(), emulateOnlyWithoutNativeXR(), preferIwerHands()],
   server: { host: '0.0.0.0', port: 8081, open: false },
   build: {
     outDir: 'dist',
@@ -97,6 +97,35 @@ if (await beamlineLacksNativeImmersiveXR()) {
           code.slice(call.end + trailingSemicolon),
         map: null,
       };
+    },
+  };
+}
+
+/**
+ * IWER boots in controller mode. Beamline is hands-only, so the emulated
+ * device, its reset, and the dev-tools store start on hands.
+ */
+function preferIwerHands() {
+  return {
+    name: 'beamline-iwer-hands',
+    enforce: 'post',
+    transform(code, id) {
+      if (!id.includes('injection-template')) return null;
+      const next = code
+        .replaceAll(
+          'inputMode: "controller", setInputMode:',
+          'inputMode: "hand", setInputMode:',
+        )
+        .replaceAll(
+          'primaryInputMode: "controller", pendingReferenceSpaceReset: false',
+          'primaryInputMode: "hand", pendingReferenceSpaceReset: false',
+        )
+        .replaceAll(
+          'this.device.primaryInputMode = "controller", this.device.stereoEnabled = false',
+          'this.device.primaryInputMode = "hand", this.device.stereoEnabled = false',
+        );
+      if (next === code) return null;
+      return { code: next, map: null };
     },
   };
 }

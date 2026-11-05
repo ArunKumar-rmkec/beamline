@@ -36,6 +36,8 @@ import {
   BOARD_SIDE_M,
   BOARD_HEIGHT,
   BOARD_WIDTH,
+  GRAB_PAD_RADIUS,
+  SOLO_REACH_RADIUS,
   BLOCKER_HALF_HEIGHT,
   BLOCKER_HALF_WIDTH,
   EDGE_BUTTON_DEPTH,
@@ -91,7 +93,10 @@ const glowMaterial = new MeshBasicMaterial({
   blending: AdditiveBlending,
   depthWrite: false,
 });
-const grabGeometry = new CylinderGeometry(0.05, 0.05, 0.012, 24);
+const grabGeometry = new CylinderGeometry(GRAB_PAD_RADIUS, GRAB_PAD_RADIUS, 0.012, 24);
+const soloReachGeometry = new CylinderGeometry(SOLO_REACH_RADIUS, SOLO_REACH_RADIUS, 0.012, 20);
+const highlightGeometry = new CylinderGeometry(0.074, 0.074, 0.006, 32);
+const mirrorEdgeGeometry = new BoxGeometry(MIRROR_HALF_LENGTH * 2 + 0.014, 0.0045, 0.0045);
 const grabMaterial = new MeshStandardMaterial({
   color: 0xd5e4f5,
   transparent: true,
@@ -100,6 +105,14 @@ const grabMaterial = new MeshStandardMaterial({
   metalness: 0.05,
   depthWrite: false,
 });
+const reachMaterial = new MeshBasicMaterial({
+  transparent: true,
+  opacity: 0,
+  depthWrite: false,
+  colorWrite: false,
+});
+const highlightMaterial = new MeshBasicMaterial({ color: 0xffe14a });
+const mirrorEdgeMaterial = new MeshBasicMaterial({ color: 0xf4fbff });
 const mirrorGeometry = new BoxGeometry(MIRROR_HALF_LENGTH * 2, 0.01, 0.016);
 const mirrorMaterial = new MeshStandardMaterial({
   color: 0xeef3f8,
@@ -175,23 +188,20 @@ interface Spark {
 
 function labelTexture(text: string, fill: string, ink: string): CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 128;
+  canvas.width = 512;
+  canvas.height = 256;
   const context = canvas.getContext('2d');
   if (context) {
     context.fillStyle = fill;
     context.fillRect(0, 0, canvas.width, canvas.height);
-    context.strokeStyle = '#140e04';
-    context.lineWidth = 16;
+    context.strokeStyle = 'rgba(8, 10, 14, 0.45)';
+    context.lineWidth = 10;
     context.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
     context.fillStyle = ink;
-    context.strokeStyle = ink;
-    context.font = 'bold 72px sans-serif';
+    context.font = '600 108px Inter, "Liberation Sans", sans-serif';
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.lineWidth = 10;
-    context.strokeText(text, 128, 68);
-    context.fillText(text, 128, 68);
+    context.fillText(text, canvas.width / 2, canvas.height / 2 + 4);
   }
   const texture = new CanvasTexture(canvas);
   texture.colorSpace = SRGBColorSpace;
@@ -525,9 +535,17 @@ export class BoardSystem extends createSystem({
   }
 
   private clearLevel(): void {
+    const grab = this.world.getSystem(GrabSystem);
     for (const piece of this.pieces) {
-      piece.object.removeFromParent();
-      piece.entity?.removeComponent(OneHandGrabbable);
+      if (piece.entity) {
+        grab?.forceRelease(piece.entity);
+        // Destroying drops the transform before the mesh is detached. Removing
+        // the mesh first clears the parent and TransformSystem warns.
+        piece.entity.destroy();
+        piece.entity = null;
+      } else {
+        piece.object.removeFromParent();
+      }
     }
     this.pieces.length = 0;
     for (const target of this.targets) {
@@ -552,11 +570,28 @@ export class BoardSystem extends createSystem({
       group.add(gem);
     } else {
       group.add(new Mesh(mirrorGeometry, mirrorMaterial));
+      const edge = new Mesh(mirrorEdgeGeometry, mirrorEdgeMaterial);
+      edge.name = 'mirror-edge';
+      edge.position.set(0, 0.007, 0.01);
+      group.add(edge);
     }
     if (piece.movable) {
       const pad = new Mesh(grabGeometry, grabMaterial);
+      pad.name = 'pad';
       pad.rotation.x = Math.PI / 2;
       group.add(pad);
+      if (movablePieces(this.level).length === 1) {
+        const reach = new Mesh(soloReachGeometry, reachMaterial);
+        reach.name = 'reach';
+        reach.rotation.x = Math.PI / 2;
+        group.add(reach);
+      }
+      const highlight = new Mesh(highlightGeometry, highlightMaterial);
+      highlight.name = 'grabbed';
+      highlight.rotation.x = Math.PI / 2;
+      highlight.position.z = -0.008;
+      highlight.visible = false;
+      group.add(highlight);
     }
     group.position.set(center.x, center.y, piece.type === 'blocker' ? 0.03 : PIECE_Z);
     if (piece.type !== 'blocker') group.rotation.z = radians;
@@ -680,7 +715,7 @@ export class BoardSystem extends createSystem({
     this.forward.normalize();
     this.boardPos.copy(this.headPos).addScaledVector(this.forward, BOARD_FORWARD_M);
     this.boardPos.y -= BOARD_DROP_M;
-    // Player's right, so the resting right hand meets the first mirror.
+    // Zero when the tray is centered on the facing direction.
     this.scratch.set(-this.forward.z, 0, this.forward.x);
     if (this.scratch.lengthSq() > 1e-8) {
       this.scratch.normalize().multiplyScalar(BOARD_SIDE_M);
@@ -729,6 +764,11 @@ export class BoardSystem extends createSystem({
       const center = cellCenter(piece.col, piece.row);
       piece.object.position.set(center.x, center.y, piece.type === 'blocker' ? 0.03 : PIECE_Z);
       if (piece.type !== 'blocker') piece.object.rotation.set(0, 0, piece.committed);
+      const highlight = piece.object.getObjectByName('grabbed');
+      if (highlight) {
+        highlight.visible =
+          piece.entity?.hasComponent(Grabbed) === true || piece === this.hookHeld;
+      }
     }
     if (!this.handSpec) {
       this.handDisc.visible = false;
@@ -1057,7 +1097,13 @@ export class BoardSystem extends createSystem({
     const api = {
       state: () => this.hookState(),
       grab: (id: string) => this.hookGrab(id),
-      rotate: (id: string, steps: number) => this.hookRotate(id, steps),
+      rotate: (stepsOrId: string | number, maybeSteps?: number) => {
+        if (typeof stepsOrId === 'number' && maybeSteps === undefined) {
+          return this.hookRotateHeld(stepsOrId);
+        }
+        if (typeof maybeSteps === 'number') return this.hookRotate(String(stepsOrId), maybeSteps);
+        return false;
+      },
       release: () => this.hookRelease(),
       level: (n: number) => this.hookLevel(n),
       pause: () => this.hookPause(true),
@@ -1085,11 +1131,11 @@ export class BoardSystem extends createSystem({
     if (event.code === 'KeyQ') {
       event.preventDefault();
       event.stopPropagation();
-      this.hookNudge(-1);
+      this.hookRotateHeld(-1);
     } else if (event.code === 'KeyE') {
       event.preventDefault();
       event.stopPropagation();
-      this.hookNudge(1);
+      this.hookRotateHeld(1);
     } else if (event.code === 'Tab') {
       event.preventDefault();
       event.stopPropagation();
@@ -1101,10 +1147,10 @@ export class BoardSystem extends createSystem({
     }
   }
 
-  private hookNudge(steps: number): void {
-    const piece = this.hookHeld ?? this.pieces.find((item) => item.movable);
-    if (!piece) return;
-    this.hookRotate(pieceId(piece), steps);
+  private hookRotateHeld(steps: number): boolean {
+    const piece = this.hookHeld ?? this.grabbedPiece() ?? this.pieces.find((item) => item.movable);
+    if (!piece) return false;
+    return this.applySteps(piece, steps);
   }
 
   private hookCycle(direction: number): void {
@@ -1137,12 +1183,20 @@ export class BoardSystem extends createSystem({
 
   private hookRotate(id: string, steps: number): boolean {
     const piece = this.pieceById(id);
-    if (!piece || !piece.movable || !Number.isFinite(steps)) return false;
+    if (!piece) return false;
+    return this.applySteps(piece, steps);
+  }
+
+  /** Write 15° steps onto the piece. Skips the pinch-twist integrator. */
+  private applySteps(piece: LivePiece, steps: number): boolean {
+    if (!piece.movable || !Number.isFinite(steps)) return false;
     this.hookHeld = piece;
     if (piece.entity) this.world.getSystem(GrabSystem)?.forceRelease(piece.entity);
-    const next = piece.committed + Math.trunc(steps) * SNAP_STEP_RADIANS;
+    this.endTwist();
+    const next = wrapPi(piece.committed + Math.trunc(steps) * SNAP_STEP_RADIANS);
     piece.committed = next;
     piece.smoothed = next;
+    if (piece.type !== 'blocker') piece.object.rotation.z = next;
     this.audio.tick();
     this.save();
     this.syncBeam();

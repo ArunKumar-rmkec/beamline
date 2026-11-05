@@ -31,6 +31,8 @@ interface BeamlineTestApi {
     };
   };
   grab(id: string): boolean;
+  /** `rotate(1)` turns the grabbed piece one 15° step. `rotate(id, steps)` turns that piece. */
+  rotate(steps: number): boolean;
   rotate(id: string, steps: number): boolean;
   release(): void;
   level(n: number): void;

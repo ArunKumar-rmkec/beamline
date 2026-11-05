@@ -2,7 +2,7 @@
 
 A seated mixed-reality laser puzzle for the Meta Quest Browser. Pinch a mirror or a prism and twist it in 15° steps until every crystal is lit.
 
-Hands only. Controllers are not used. The board sits about 40cm in front of your eyes and 15cm below them, tilted like a tray table so the whole board, including **Center** and **Hand**, stays in view. It is shifted slightly toward your right hand, which is where a resting hand can pinch the first mirror. There are no spatial anchors. **Center** on the near edge puts it back in front of you. **Hand** on that same edge turns the Hand Mirror prototype on. Progress is saved in `localStorage` under the `beamline:` prefix (`beamline:progress` holds the current level and piece angles).
+Hands only. Controllers are not used. The emulator starts in hands mode. The board sits centered, about 40cm in front of your eyes and 15cm below them, tilted like a tray table so the whole board, including **Center** and **Hand**, stays in view. There are no spatial anchors. **Center** on the near edge puts it back in front of you. **Hand** on that same edge turns the Hand Mirror prototype on. Progress is saved in `localStorage` under the `beamline:` prefix. `beamline:progress` is `{ v: 1, level, angles }` with a 1-based level, written on every level change and rotation.
 
 ## Requirements
 
@@ -19,7 +19,7 @@ npm run dev
 
 Open the URL Vite prints (normally `https://localhost:8081/`). Accept the local certificate if Chrome asks. The page shows one **Enter XR** button under the title. There is no second button.
 
-In the emulator, switch to hands if the session starts on controllers. Pinch the pale disc on a mirror or prism and twist. The beam updates when the piece snaps. Poke **Center** to place the board again. Poke **Hand** to let an open palm reflect the beam. That bounce snaps to 15° and locks once it lights a target, so you can lower your hand.
+The emulator opens in hands mode. Pinch the pale disc on a mirror or prism and twist. A grabbed piece shows a yellow ring. The beam updates when the piece snaps. Poke **Center** to place the board again. Poke **Hand** to let an open palm reflect the beam. That bounce snaps to 15° and locks once it lights a target, so you can lower your hand.
 
 A mirror reflects. A prism splits the beam in two: straight through, and a mirror bounce. A dark block stops the beam. When every crystal is lit, the board glows, a short chord plays, and the next level starts. The last level stays lit.
 
@@ -48,7 +48,8 @@ Add `?test=1` to the page URL. The build then sets `window.beamline`. Without th
 ```js
 beamline.state()                 // level (1–6), paused, won, lit[], grabbed, pieces[]
 beamline.grab('mirror-2-2')      // or grab('0') for the first movable piece
-beamline.rotate('mirror-2-2', 3) // 3 steps × 15°
+beamline.rotate(1)               // one 15° step on the grabbed piece
+beamline.rotate('mirror-2-2', 3) // 3 steps × 15° on that piece
 beamline.release()
 beamline.level(4)                // levels are 1–6, loaded at their starting angles
 beamline.pause()

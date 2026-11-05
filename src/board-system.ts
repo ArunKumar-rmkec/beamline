@@ -3,6 +3,7 @@ import {
   BoxGeometry,
   BufferGeometry,
   CanvasTexture,
+  Color,
   CylinderGeometry,
   DoubleSide,
   Entity,
@@ -299,6 +300,7 @@ export class BoardSystem extends createSystem({
   private readonly local = new Vector3();
   private readonly palmNormal = new Vector3();
   private readonly scratchQuat = new Quaternion();
+  private readonly previewBackground = new Color(0x1c2836);
   private readonly basis = new Matrix4();
   private readonly inverse = new Matrix4();
   private readonly normal: Vec3 = { x: 0, y: 0, z: 1 };
@@ -340,7 +342,10 @@ export class BoardSystem extends createSystem({
           this.audio.suspend();
           this.save();
         }
-        if (state === VisibilityState.Visible) this.audio.resume();
+        if (state === VisibilityState.Visible) {
+          this.world.scene.background = null;
+          this.audio.resume();
+        }
         this.applyPause();
       }),
       () => document.removeEventListener('visibilitychange', onDocumentVisibility),
@@ -360,6 +365,7 @@ export class BoardSystem extends createSystem({
       if (this.won) this.anim += delta;
     }
     this.layoutPieces();
+    this.frameDesktopPreview();
     const pulse = this.won && !this.paused ? 1 + 0.12 * Math.sin(this.anim * 5) : 1;
     for (const target of this.targets) target.scale.setScalar(pulse);
   }
@@ -655,6 +661,27 @@ export class BoardSystem extends createSystem({
     this.board.position.copy(this.boardPos);
     this.board.updateWorldMatrix(true, true);
     this.endTwist();
+  }
+
+  /**
+   * Before Enter XR the desktop camera is not the headset. Sit it on the
+   * board normal so the whole tilted tray is in frame.
+   */
+  private frameDesktopPreview(): void {
+    if (this.xrState !== VisibilityState.NonImmersive) return;
+    this.world.scene.background = this.previewBackground;
+    this.board.updateWorldMatrix(true, true);
+    this.boardPos.setFromMatrixPosition(this.board.matrixWorld);
+    this.forward.set(0, 0, 1).transformDirection(this.board.matrixWorld);
+    this.scratch.copy(this.boardPos).addScaledVector(this.forward, 0.92);
+    const camera = this.world.camera;
+    if (camera.parent) {
+      camera.parent.updateWorldMatrix(true, false);
+      camera.parent.worldToLocal(this.scratch);
+    }
+    camera.position.copy(this.scratch);
+    camera.lookAt(this.boardPos);
+    camera.updateProjectionMatrix();
   }
 
   /** Far edge up, normal tipped toward the player. `forward` is horizontal. */

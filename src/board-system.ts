@@ -86,6 +86,7 @@ const HAND_RADIUS = 0.03;
 /** A single-frame jump larger than this is a tracking loss, not a wrist. */
 const TRACKING_JUMP = (40 * Math.PI) / 180;
 const TIP_DEAD_ZONE = 0.025;
+const BUTTON_DEBOUNCE_MS = 250;
 
 const beamGeometry = new BoxGeometry(1, 1, 1);
 const beamMaterial = new MeshBasicMaterial({ color: 0xfff4f6 });
@@ -331,6 +332,12 @@ export class BoardSystem extends createSystem({
   private cueAnim = 0;
   private testMode = false;
   private lit: boolean[] = [];
+  private recenterMesh: Mesh | null = null;
+  private handMesh: Mesh | null = null;
+  private centerPresses = 0;
+  private handPresses = 0;
+  private lastCenterPress = -Infinity;
+  private lastHandPress = -Infinity;
 
   private readonly headPos = new Vector3();
   private readonly forward = new Vector3();
@@ -353,12 +360,14 @@ export class BoardSystem extends createSystem({
     this.levelIndex = saved?.level ?? 0;
     this.buildStatic();
     this.loadLevel(this.levelIndex, saved?.angles ?? null);
-    this.queries.recenterPressed.subscribe('qualify', () => {
-      this.recenter();
-    });
-    this.queries.handPressed.subscribe('qualify', () => {
-      this.toggleHandMirror();
-    });
+    this.cleanupFuncs.push(
+      this.queries.recenterPressed.subscribe('qualify', () => {
+        this.recenter();
+      }),
+      this.queries.handPressed.subscribe('qualify', () => {
+        this.toggleHandMirror();
+      }),
+    );
 
     const onDocumentVisibility = () => {
       this.docHidden = document.visibilityState === 'hidden';
@@ -393,10 +402,18 @@ export class BoardSystem extends createSystem({
   }
 
   private recenter(): void {
+    const now = performance.now();
+    if (now - this.lastCenterPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastCenterPress = now;
+    this.centerPresses += 1;
     this.needsPlace = true;
   }
 
   private toggleHandMirror(): void {
+    const now = performance.now();
+    if (now - this.lastHandPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastHandPress = now;
+    this.handPresses += 1;
     this.handEnabled = !this.handEnabled;
     this.handLocked = false;
     this.handSpec = null;
@@ -524,8 +541,8 @@ export class BoardSystem extends createSystem({
     );
     recenter.name = 'recenter';
     recenter.position.set(-0.07, EDGE_BUTTON_Y, 0.012);
-    recenter.addEventListener('click', () => this.recenter());
     recenter.addEventListener('pointerdown', () => this.recenter());
+    this.recenterMesh = recenter;
     const recenterEntity = this.world.createTransformEntity(recenter, {
       parent: this.boardEntity,
     });
@@ -538,8 +555,8 @@ export class BoardSystem extends createSystem({
     const hand = new Mesh(buttonGeometry, this.handMaterial);
     hand.name = 'hand-mirror';
     hand.position.set(0.07, EDGE_BUTTON_Y, 0.012);
-    hand.addEventListener('click', () => this.toggleHandMirror());
     hand.addEventListener('pointerdown', () => this.toggleHandMirror());
+    this.handMesh = hand;
     const handEntity = this.world.createTransformEntity(hand, { parent: this.boardEntity });
     handEntity.addComponent(PokeInteractable);
     handEntity.addComponent(HandMirrorButton);
@@ -1350,6 +1367,13 @@ export class BoardSystem extends createSystem({
     return null;
   }
 
+  private worldPoint(object: Object3D | null): { x: number; y: number; z: number } {
+    if (!object) return { x: 0, y: 0, z: 0 };
+    object.updateWorldMatrix(true, false);
+    this.scratch.setFromMatrixPosition(object.matrixWorld);
+    return { x: roundMm(this.scratch.x), y: roundMm(this.scratch.y), z: roundMm(this.scratch.z) };
+  }
+
   private headRelative(object: Object3D): { x: number; y: number; z: number } {
     this.player.head.updateWorldMatrix(true, false);
     this.headPos.setFromMatrixPosition(this.player.head.matrixWorld);
@@ -1372,6 +1396,11 @@ export class BoardSystem extends createSystem({
         enabled: this.handEnabled,
         visible: this.handDisc.visible,
       },
+      presses: {
+        center: this.centerPresses,
+        hand: this.handPresses,
+      },
+      trayWorld: this.worldPoint(this.board),
       pieces: this.pieces.map((piece) => ({
         id: pieceId(piece),
         type: piece.type,
@@ -1381,6 +1410,10 @@ export class BoardSystem extends createSystem({
         degrees: pieceDegrees(piece),
       })),
       pose: {
+        buttons: {
+          center: this.worldPoint(this.recenterMesh),
+          hand: this.worldPoint(this.handMesh),
+        },
         hands: {
           left: this.headRelative(this.player.gripSpaces.left),
           right: this.headRelative(this.player.gripSpaces.right),

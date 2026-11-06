@@ -80,6 +80,8 @@ export class BoardAudio {
   }
 
   private scheduleWin(context: AudioContext): void {
+    // One chord per win: ignore a second trigger within 1s (e.g. palm lock + release).
+    if (this._chordsPlayed > 0 && performance.now() - this._lastWinChordAt < 1000) return;
     this._chordsPlayed += 1;
     this._lastWinChordAt = performance.now();
     this.blip(context, 523.25, 0.42, 'sine', 0.07);

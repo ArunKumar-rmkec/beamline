@@ -15,8 +15,8 @@ export const BLOCKER_HALF_HEIGHT = 0.024;
  * inside a seated reach on a Quest. The tray is centered on the facing
  * direction. The tilt faces the surface at the player.
  */
-export const BOARD_FORWARD_M = 0.4;
-export const BOARD_DROP_M = 0.15;
+export const BOARD_FORWARD_M = 0.44;
+export const BOARD_DROP_M = 0.26;
 /** Meters to the player's right of the facing direction. Zero keeps the tray centered. */
 export const BOARD_SIDE_M = 0;
 /** Visible pinch disc on a movable piece. */
@@ -27,8 +27,9 @@ export const GRAB_PAD_RADIUS = 0.05;
  */
 export const GENEROUS_GRAB_RADIUS = 0.38;
 export const SOLO_REACH_RADIUS = GENEROUS_GRAB_RADIUS;
-/** Radians from horizontal. Far edge up, surface facing the seated player. */
-export const TRAY_TILT_RADIANS = Math.atan2(BOARD_FORWARD_M, BOARD_DROP_M);
+/** Tilted toward the viewer ~30-40°. Far edge up, surface facing the seated player. */
+export const TRAY_TILT_DEGREES = 35;
+export const TRAY_TILT_RADIANS = (TRAY_TILT_DEGREES * Math.PI) / 180;
 
 /** Near-edge poke targets. They sit outside the grid on the near edge shelf, never overlapping level geometry. */
 export const EDGE_BUTTON_WIDTH = 0.088;

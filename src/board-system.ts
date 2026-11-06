@@ -75,6 +75,7 @@ import {
   type Quat,
   type Vec3,
 } from './beam/snap.js';
+import { WristTracker } from './beam/wrist.js';
 import { solveBeam, type BeamHand, type BeamSegment } from './beam/solver.js';
 import {
   CloseMenuButton,
@@ -87,6 +88,7 @@ import {
   RestartButton,
   ResumeButton,
   TutorialButton,
+  TutorialSkipButton,
 } from './components.js';
 import {
   clearTutorial,
@@ -243,9 +245,9 @@ function labelTexture(text: string, fill: string, ink: string): CanvasTexture {
 }
 
 const TUTORIAL_STEPS = [
-  'Poke buttons with your finger',
-  'Pinch a mirror to grab it',
-  'Twist your hand to rotate',
+  'Pinch a mirror to grab',
+  'Twist your wrist to turn it',
+  'Light the target',
 ] as const;
 
 function tutorialCardTexture(text: string): CanvasTexture {
@@ -361,6 +363,7 @@ export class BoardSystem extends createSystem({
   dailyChoicePressed: { required: [DailyChoiceButton, Pressed] },
   closeMenuPressed: { required: [CloseMenuButton, Pressed] },
   tutorialPressed: { required: [TutorialButton, Pressed] },
+  tutorialSkipPressed: { required: [TutorialSkipButton, Pressed] },
   resumePressed: { required: [ResumeButton, Pressed] },
   restartPressed: { required: [RestartButton, Pressed] },
 }) {
@@ -468,14 +471,22 @@ export class BoardSystem extends createSystem({
   private gazeAngleDeg: number | null = null;
   private readonly headForward = new Vector3();
 
+  private readonly wristTracker = new WristTracker();
+  private readonly tempQuat = new Quaternion();
+
   private tutorialCard!: Mesh;
   private tutorialButtonMesh!: Mesh;
   private tutorialButtonMaterial!: MeshBasicMaterial;
+  private tutorialSkipButtonMesh!: Mesh;
+  private tutorialSkipButtonMaterial!: MeshBasicMaterial;
+  private tutorialSkipEntity!: Entity;
   private tutorialStep = 0;
   private tutorialVisible = false;
   private tutorialChecked = false;
   private tutorialPresses = 0;
+  private tutorialSkipPresses = 0;
   private lastTutorialPress = -Infinity;
+  private lastTutorialSkipPress = -Infinity;
 
   private resumePresses = 0;
   private lastResumePress = -Infinity;
@@ -554,6 +565,10 @@ export class BoardSystem extends createSystem({
       this.queries.tutorialPressed.subscribe('qualify', () => {
         if (!this.inputSettled || !this.isPressNearButton(this.tutorialButtonMesh)) return;
         this.advanceTutorial();
+      }),
+      this.queries.tutorialSkipPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.tutorialSkipButtonMesh)) return;
+        this.skipTutorial();
       }),
       this.queries.resumePressed.subscribe('qualify', () => {
         if (!this.inputSettled || !this.isPressNearButton(this.resumeButtonMesh)) return;
@@ -711,14 +726,31 @@ export class BoardSystem extends createSystem({
       this.tutorialVisible = false;
       if (this.tutorialCard) this.tutorialCard.visible = false;
       if (this.tutorialButtonMesh) this.tutorialButtonMesh.visible = false;
+      if (this.tutorialSkipButtonMesh) this.tutorialSkipButtonMesh.visible = false;
       writeTutorialDone(localStorage);
     }
   }
 
+  private skipTutorial(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
+    if (!this.tutorialVisible) return;
+    const now = performance.now();
+    if (!bypassDebounce && now - this.lastTutorialSkipPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastTutorialSkipPress = now;
+    this.tutorialSkipPresses += 1;
+    this.audio.interact();
+    this.tutorialVisible = false;
+    if (this.tutorialCard) this.tutorialCard.visible = false;
+    if (this.tutorialButtonMesh) this.tutorialButtonMesh.visible = false;
+    if (this.tutorialSkipButtonMesh) this.tutorialSkipButtonMesh.visible = false;
+    writeTutorialDone(localStorage);
+  }
+
   private updateTutorialCard(): void {
-    if (!this.tutorialCard || !this.tutorialButtonMesh) return;
+    if (!this.tutorialCard || !this.tutorialButtonMesh || !this.tutorialSkipButtonMesh) return;
     this.tutorialCard.visible = this.tutorialVisible;
     this.tutorialButtonMesh.visible = this.tutorialVisible;
+    this.tutorialSkipButtonMesh.visible = this.tutorialVisible;
     if (!this.tutorialVisible) return;
     const cardMat = this.tutorialCard.material;
     if (cardMat instanceof MeshBasicMaterial) {
@@ -779,6 +811,32 @@ export class BoardSystem extends createSystem({
       if (this.won) this.anim += delta;
       this.updateLevel1Cue(delta);
       this.updateGaze();
+
+      if (this.tutorialVisible && this.inputSettled) {
+        if (this.tutorialStep === 0) {
+          const held = this.active ?? this.pinchHeldPiece ?? this.grabbedPiece();
+          if (held) {
+            this.tutorialStep = 1;
+            this.updateTutorialCard();
+          }
+        } else if (this.tutorialStep === 1) {
+          if (
+            this.wristTracker.state().appliedSteps !== 0 ||
+            (this.active && this.active.committed !== this.startAngle)
+          ) {
+            this.tutorialStep = 2;
+            this.updateTutorialCard();
+          }
+        } else if (this.tutorialStep === 2) {
+          if (this.won) {
+            this.tutorialVisible = false;
+            if (this.tutorialCard) this.tutorialCard.visible = false;
+            if (this.tutorialButtonMesh) this.tutorialButtonMesh.visible = false;
+            if (this.tutorialSkipButtonMesh) this.tutorialSkipButtonMesh.visible = false;
+            writeTutorialDone(localStorage);
+          }
+        }
+      }
     }
     this.layoutPieces();
     this.frameDesktopPreview();
@@ -800,6 +858,7 @@ export class BoardSystem extends createSystem({
       this.levelsMesh,
       this.oneHandMesh,
       this.tutorialButtonMesh,
+      this.tutorialSkipButtonMesh,
       this.resumeButtonMesh,
       this.restartButtonMesh,
       ...this.menuLevelMeshes,
@@ -1074,7 +1133,7 @@ export class BoardSystem extends createSystem({
 
     const levelBtnGeom = new BoxGeometry(0.072, 0.034, 0.016);
     const colXs = [-0.09, 0.0, 0.09];
-    const rowYs = [0.035, -0.015];
+    const rowYs = [0.018, -0.026];
 
     for (let i = 0; i < 6; i += 1) {
       const col = i % 3;
@@ -1090,7 +1149,8 @@ export class BoardSystem extends createSystem({
       });
       const btnMesh = new Mesh(levelBtnGeom, btnMat);
       btnMesh.name = `menu-level-${i + 1}`;
-      btnMesh.position.set(colXs[col]!, rowYs[row]!, 0.012);
+      btnMesh.position.set(colXs[col]!, rowYs[row]!, 0.012).add(this.menuGroup.position);
+      btnMesh.visible = false;
       btnMesh.addEventListener('pointerdown', () => {
         if (!this.inputSettled) return;
         this.selectLevelFromMenu(i);
@@ -1115,7 +1175,8 @@ export class BoardSystem extends createSystem({
     const dailyGeom = new BoxGeometry(0.11, 0.034, 0.016);
     const dailyMesh = new Mesh(dailyGeom, dailyMat);
     dailyMesh.name = 'menu-daily';
-    dailyMesh.position.set(-0.045, -0.065, 0.012);
+    dailyMesh.position.set(-0.045, -0.07, 0.012).add(this.menuGroup.position);
+    dailyMesh.visible = false;
     dailyMesh.addEventListener('pointerdown', () => {
       if (!this.inputSettled) return;
       this.selectDailyFromMenu();
@@ -1133,7 +1194,8 @@ export class BoardSystem extends createSystem({
     const closeGeom = new BoxGeometry(0.075, 0.034, 0.016);
     const closeMesh = new Mesh(closeGeom, closeMat);
     closeMesh.name = 'menu-close';
-    closeMesh.position.set(0.07, -0.065, 0.012);
+    closeMesh.position.set(0.07, -0.07, 0.012).add(this.menuGroup.position);
+    closeMesh.visible = false;
     closeMesh.addEventListener('pointerdown', () => {
       if (!this.inputSettled) return;
       this.toggleMenu();
@@ -1148,11 +1210,15 @@ export class BoardSystem extends createSystem({
     this.tutorialButtonMaterial = new MeshBasicMaterial({
       map: labelTexture('Next', '#ffe14a', '#1a1000'),
     });
-    const tutorialBtnGeom = new BoxGeometry(0.075, 0.025, 0.016);
+    const tutorialBtnGeom = new BoxGeometry(0.088, 0.025, 0.016);
     const tutorialBtn = new Mesh(tutorialBtnGeom, this.tutorialButtonMaterial);
     tutorialBtn.name = 'tutorial-button';
-    tutorialBtn.position.set(0, BOARD_HEIGHT / 2 + 0.038, 0.026);
+    tutorialBtn.position.set(0.055, BOARD_HEIGHT / 2 + 0.038, 0.026);
     tutorialBtn.visible = false;
+    tutorialBtn.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.advanceTutorial();
+    });
     this.tutorialButtonMesh = tutorialBtn;
     const tutorialEntity = this.world.createTransformEntity(tutorialBtn, {
       parent: this.boardEntity,
@@ -1160,6 +1226,26 @@ export class BoardSystem extends createSystem({
     tutorialEntity.addComponent(PokeInteractable);
     tutorialEntity.addComponent(TutorialButton);
     this.tutorialEntity = tutorialEntity;
+
+    this.tutorialSkipButtonMaterial = new MeshBasicMaterial({
+      map: labelTexture('Skip', '#d0d7de', '#161b22'),
+    });
+    const tutorialSkipBtnGeom = new BoxGeometry(0.088, 0.025, 0.016);
+    const tutorialSkipBtn = new Mesh(tutorialSkipBtnGeom, this.tutorialSkipButtonMaterial);
+    tutorialSkipBtn.name = 'tutorial-skip-button';
+    tutorialSkipBtn.position.set(-0.055, BOARD_HEIGHT / 2 + 0.038, 0.026);
+    tutorialSkipBtn.visible = false;
+    tutorialSkipBtn.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.skipTutorial();
+    });
+    this.tutorialSkipButtonMesh = tutorialSkipBtn;
+    const tutorialSkipEntity = this.world.createTransformEntity(tutorialSkipBtn, {
+      parent: this.boardEntity,
+    });
+    tutorialSkipEntity.addComponent(PokeInteractable);
+    tutorialSkipEntity.addComponent(TutorialSkipButton);
+    this.tutorialSkipEntity = tutorialSkipEntity;
 
     const resumeBtnGeom = new BoxGeometry(0.09, 0.032, 0.018);
     const resumeBtn = new Mesh(
@@ -1260,6 +1346,11 @@ export class BoardSystem extends createSystem({
   private setMenuVisible(visible: boolean): void {
     this.menuVisible = visible;
     this.menuGroup.visible = visible;
+    // Menu buttons are parented to the board entity (for poke), not the group,
+    // so their visibility (and poke hit tests) follow the menu explicitly.
+    for (const mesh of [...this.menuLevelMeshes, this.menuDailyMesh, this.menuCloseMesh]) {
+      if (mesh) mesh.visible = visible;
+    }
     if (visible) {
       this.updateMenuButtons();
     }
@@ -1702,6 +1793,7 @@ export class BoardSystem extends createSystem({
       this.lastPinchPiece = this.active;
       this.lastPinchReleaseTime = performance.now();
     }
+    this.wristTracker.onRelease();
     this.pinchDwellTime = 0;
     this.dwellRepeatTimer = 0;
     this.twisting = false;
@@ -1794,10 +1886,60 @@ export class BoardSystem extends createSystem({
     }
     const { piece, hand } = active;
     this.readBoardAxes();
-    const grip = this.player.gripSpaces[hand];
-    grip.updateWorldMatrix(true, false);
-    this.readQuat(grip, this.gripNow);
-    this.currentGripPos.setFromMatrixPosition(grip.matrixWorld);
+
+    let hasJointPose = false;
+    const session = this.xrManager?.getSession?.();
+    const frame = this.xrManager?.getFrame?.() ?? (this as any).xrFrame;
+    const refSpace = this.xrManager?.getReferenceSpace?.();
+
+    if (frame && refSpace && session?.inputSources) {
+      for (const source of session.inputSources) {
+        if (source.handedness === hand && (source as any).hand) {
+          const xrHand = (source as any).hand;
+          const joint = typeof xrHand.get === 'function' ? xrHand.get('wrist') : null;
+          if (joint) {
+            const pose =
+              typeof frame.getJointPose === 'function'
+                ? frame.getJointPose(joint, refSpace)
+                : typeof frame.getPose === 'function'
+                ? frame.getPose(joint, refSpace)
+                : null;
+            if (pose) {
+              hasJointPose = true;
+              this.player.updateWorldMatrix(true, false);
+              this.currentGripPos
+                .set(
+                  pose.transform.position.x,
+                  pose.transform.position.y,
+                  pose.transform.position.z,
+                )
+                .applyMatrix4(this.player.matrixWorld);
+
+              this.scratchQuat.set(
+                pose.transform.orientation.x,
+                pose.transform.orientation.y,
+                pose.transform.orientation.z,
+                pose.transform.orientation.w,
+              );
+              this.player.getWorldQuaternion(this.tempQuat);
+              this.scratchQuat.premultiply(this.tempQuat);
+              this.gripNow.x = this.scratchQuat.x;
+              this.gripNow.y = this.scratchQuat.y;
+              this.gripNow.z = this.scratchQuat.z;
+              this.gripNow.w = this.scratchQuat.w;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (!hasJointPose) {
+      const grip = this.player.gripSpaces[hand];
+      grip.updateWorldMatrix(true, false);
+      this.readQuat(grip, this.gripNow);
+      this.currentGripPos.setFromMatrixPosition(grip.matrixWorld);
+    }
 
     if (!this.twisting || this.active !== piece) {
       this.twisting = true;
@@ -1807,6 +1949,7 @@ export class BoardSystem extends createSystem({
       this.copyQuat(this.gripNow, this.lastGripQuat);
       this.lastGripPos.copy(this.currentGripPos);
       piece.smoothed = piece.committed;
+      this.wristTracker.onGrab(piece.committed, this.gripNow, this.currentGripPos);
       return;
     }
 
@@ -1826,28 +1969,10 @@ export class BoardSystem extends createSystem({
       }
     }
 
-    const posJump = this.currentGripPos.distanceTo(this.lastGripPos) > TRACKING_MOVE_JUMP;
-    const dot = Math.abs(
-      this.lastGripQuat.x * this.gripNow.x +
-      this.lastGripQuat.y * this.gripNow.y +
-      this.lastGripQuat.z * this.gripNow.z +
-      this.lastGripQuat.w * this.gripNow.w,
-    );
-    const frameRot = 2 * Math.acos(Math.min(1, Math.max(-1, dot)));
-    const frameTwist = Math.abs(signedTwist(this.lastGripQuat, this.gripNow, this.normal));
-    const rotJump = frameRot > TRACKING_JUMP || frameTwist > TRACKING_JUMP;
-
-    if (posJump || rotJump) {
-      this.startAngle = piece.committed;
-      this.copyQuat(this.gripNow, this.startGrip);
-      piece.smoothed = piece.committed;
-    }
-
-    const twist = signedTwist(this.startGrip, this.gripNow, this.normal);
-    piece.smoothed = smoothAngle(piece.smoothed, this.startAngle + twist, delta);
-    const next = snapWithHysteresis(piece.smoothed, piece.committed);
-    if (next !== piece.committed) {
-      piece.committed = next;
+    const res = this.wristTracker.update(this.gripNow, this.currentGripPos, delta);
+    if (res.changed) {
+      piece.committed = res.pieceAngle;
+      piece.smoothed = res.pieceAngle;
       this.audio.tick();
       this.save();
       this.syncBeam();
@@ -2196,6 +2321,8 @@ export class BoardSystem extends createSystem({
       resume: () => this.hookPause(false),
       resetTutorial: () => this.hookResetTutorial(),
       press: (button: string) => this.hookPress(button),
+      skip: () => this.hookPress('skip'),
+      wrist: (quat: Quat, deltaSeconds?: number) => this.hookFeedWrist(quat, deltaSeconds),
       menu: (open?: boolean) => {
         if (typeof open === 'boolean') {
           this.setMenuVisible(open);
@@ -2461,6 +2588,29 @@ export class BoardSystem extends createSystem({
     this.updateTutorialCard();
   }
 
+  private hookFeedWrist(quat: Quat, deltaSeconds = 0.016): boolean {
+    const active = this.active ?? this.pinchHeldPiece ?? this.grabbedPiece();
+    if (!active) return false;
+    if (!this.twisting || this.active !== active) {
+      this.twisting = true;
+      this.active = active;
+      this.startAngle = active.committed;
+      this.copyQuat(quat, this.startGrip);
+      this.copyQuat(quat, this.lastGripQuat);
+      active.smoothed = active.committed;
+      this.wristTracker.onGrab(active.committed, quat, null);
+    }
+    const res = this.wristTracker.update(quat, null, deltaSeconds);
+    if (res.changed) {
+      active.committed = res.pieceAngle;
+      active.smoothed = res.pieceAngle;
+      this.audio.tick();
+      this.save();
+      this.syncBeam();
+    }
+    return true;
+  }
+
   private hookPress(button: string): boolean {
     const key = button.toLowerCase();
     if (key === 'center' || key === 'recenter') {
@@ -2493,6 +2643,10 @@ export class BoardSystem extends createSystem({
     }
     if (key === 'tutorial' || key === 'next' || key === 'gotit' || key === 'got it') {
       this.advanceTutorial(true);
+      return true;
+    }
+    if (key === 'skip') {
+      this.skipTutorial(true);
       return true;
     }
     if (key === 'resume') {
@@ -2552,6 +2706,7 @@ export class BoardSystem extends createSystem({
       won: this.won,
       lit: this.lit.slice(),
       grabbed: held ? pieceId(held) : null,
+      wrist: this.wristTracker.state(),
       gaze: {
         piece: this.gazedPiece ? pieceId(this.gazedPiece) : null,
         id: this.gazedPiece ? pieceId(this.gazedPiece) : null,
@@ -2593,6 +2748,7 @@ export class BoardSystem extends createSystem({
         oneHand: this.oneHandPresses,
         tutorial: this.tutorialPresses,
         next: this.tutorialPresses,
+        skip: this.tutorialSkipPresses,
         resume: this.resumePresses,
         restart: this.restartPresses,
       },
@@ -2613,8 +2769,14 @@ export class BoardSystem extends createSystem({
           oneHand: this.worldPoint(this.oneHandMesh),
           tutorial: this.worldPoint(this.tutorialButtonMesh),
           next: this.worldPoint(this.tutorialButtonMesh),
+          skip: this.worldPoint(this.tutorialSkipButtonMesh),
           resume: this.worldPoint(this.resumeButtonMesh),
           restart: this.worldPoint(this.restartButtonMesh),
+          ...(this.menuDailyMesh ? { daily: this.worldPoint(this.menuDailyMesh) } : {}),
+          ...(this.menuCloseMesh ? { close: this.worldPoint(this.menuCloseMesh) } : {}),
+          ...Object.fromEntries(
+            this.menuLevelMeshes.map((mesh, i) => [`menuLevel${i + 1}`, this.worldPoint(mesh)]),
+          ),
         },
         hands: {
           left: this.headRelative(this.player.gripSpaces.left),

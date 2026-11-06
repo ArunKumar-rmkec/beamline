@@ -35,6 +35,13 @@ export const TutorialButton = createComponent(
   'Poke target that advances or dismisses the first-run tutorial',
 );
 
+/** Marks the skip poke target on the first-run tutorial panel. */
+export const TutorialSkipButton = createComponent(
+  'TutorialSkipButton',
+  {},
+  'Poke target that skips the first-run tutorial',
+);
+
 /** Marks the poke target on the paused panel. */
 export const ResumeButton = createComponent(
   'ResumeButton',
@@ -76,6 +83,7 @@ export default defineComponents([
   LevelsButton,
   OneHandButton,
   TutorialButton,
+  TutorialSkipButton,
   ResumeButton,
   RestartButton,
   LevelChoiceButton,

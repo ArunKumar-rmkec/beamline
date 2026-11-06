@@ -23,8 +23,11 @@ test('daily generator produces verified solvable puzzles across 60 dates without
 });
 
 test('localDateString formats YYYY-MM-DD properly', () => {
-  const d = new Date(2026, 10, 6); // Nov 6, 2026
-  assert.equal(localDateString(d), '2026-11-06');
+  assert.equal(localDateString(new Date(Date.UTC(2026, 10, 6, 12))), '2026-11-06');
+  // The daily key is the UTC date: 23:30 UTC Nov 6 is still Nov 6, 00:30 UTC Nov 7 is Nov 7.
+  assert.equal(localDateString(new Date(Date.UTC(2026, 10, 6, 23, 30))), '2026-11-06');
+  assert.equal(localDateString(new Date(Date.UTC(2026, 10, 7, 0, 30))), '2026-11-07');
+  assert.notDeepEqual(generateDaily('2026-11-06'), generateDaily('2026-11-07'));
 });
 
 test('daily puzzle win storage round-trips under beamline:daily', () => {

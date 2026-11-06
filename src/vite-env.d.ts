@@ -25,6 +25,12 @@ interface BeamlineTestApi {
     won: boolean;
     lit: boolean[];
     grabbed: string | null;
+    wrist: {
+      rollDeg: number;
+      baselineDeg: number;
+      appliedSteps: number;
+      guardRejects: number;
+    };
     gaze?: {
       piece: string | null;
       id?: string | null;
@@ -67,6 +73,7 @@ interface BeamlineTestApi {
       oneHand?: number;
       tutorial: number;
       next?: number;
+      skip?: number;
       resume: number;
       restart: number;
       [button: string]: number | undefined;
@@ -81,6 +88,7 @@ interface BeamlineTestApi {
         oneHand?: BeamlinePosePoint;
         tutorial: BeamlinePosePoint;
         next?: BeamlinePosePoint;
+        skip?: BeamlinePosePoint;
         resume: BeamlinePosePoint;
         restart: BeamlinePosePoint;
         [button: string]: BeamlinePosePoint | undefined;
@@ -93,6 +101,7 @@ interface BeamlineTestApi {
   /** `rotate(1)` turns the grabbed piece one 15° step. `rotate(id, steps)` turns that piece. */
   rotate(steps: number): boolean;
   rotate(id: string, steps: number): boolean;
+  wrist?(quat: { x: number; y: number; z: number; w: number }, deltaSeconds?: number): boolean;
   release(): void;
   level(n: number): void;
   pause(): void;

@@ -10,7 +10,7 @@
     "dev:status": "iwsdk dev status",
     "reference:status": "iwsdk reference status",
     "reference:warmup": "iwsdk reference warmup",
-    "test": "node --experimental-strip-types --test src/beam/solver.test.ts src/beam/snap.test.ts src/beam/levels.test.ts src/beam/placement.test.ts src/beam/palm.test.ts src/storage.test.ts src/audio.test.ts src/beam/daily.test.ts src/beam/gaze.test.ts",
+    "test": "node --experimental-strip-types --test src/beam/solver.test.ts src/beam/snap.test.ts src/beam/levels.test.ts src/beam/placement.test.ts src/beam/palm.test.ts src/storage.test.ts src/audio.test.ts src/beam/daily.test.ts src/beam/gaze.test.ts src/beam/wrist.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "preview": "vite preview"

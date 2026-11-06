@@ -4,6 +4,9 @@ export const MIRROR_ROT_KEY = `${STORAGE_PREFIX}mirror-rot`;
 export const PROGRESS_KEY = `${STORAGE_PREFIX}progress`;
 export const HAND_MIRROR_KEY = `${STORAGE_PREFIX}hand-mirror`;
 export const TUTORIAL_KEY = `${STORAGE_PREFIX}tutorial`;
+export const DAILY_KEY = `${STORAGE_PREFIX}daily`;
+export const ONE_HAND_KEY = `${STORAGE_PREFIX}one-hand`;
+export const UNLOCKED_KEY = `${STORAGE_PREFIX}unlocked`;
 
 export interface KeyValueStore {
   getItem(key: string): string | null;
@@ -125,6 +128,57 @@ export function clearTutorial(store: KeyValueStore): void {
     } else {
       store.setItem(TUTORIAL_KEY, '');
     }
+  } catch {
+    // Falls back without throwing.
+  }
+}
+
+export function readDailyWon(store: KeyValueStore, dateStr: string): boolean {
+  try {
+    return store.getItem(DAILY_KEY) === dateStr;
+  } catch {
+    return false;
+  }
+}
+
+export function writeDailyWon(store: KeyValueStore, dateStr: string): void {
+  try {
+    store.setItem(DAILY_KEY, dateStr);
+  } catch {
+    // Falls back without throwing.
+  }
+}
+
+export function readOneHand(store: KeyValueStore): boolean {
+  try {
+    return store.getItem(ONE_HAND_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function writeOneHand(store: KeyValueStore, enabled: boolean): void {
+  try {
+    store.setItem(ONE_HAND_KEY, enabled ? '1' : '0');
+  } catch {
+    // Falls back without throwing.
+  }
+}
+
+export function readUnlocked(store: KeyValueStore, fallback = 1): number {
+  try {
+    const raw = store.getItem(UNLOCKED_KEY);
+    if (raw == null || raw.trim() === '') return fallback;
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 1 ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function writeUnlocked(store: KeyValueStore, level: number): void {
+  try {
+    store.setItem(UNLOCKED_KEY, String(level));
   } catch {
     // Falls back without throwing.
   }

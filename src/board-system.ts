@@ -61,7 +61,9 @@ import {
   type LevelPiece,
   type PieceType,
 } from './beam/levels.js';
-import { palmOutgoingDegrees } from './beam/palm.js';
+import { generateDaily, localDateString } from './beam/daily.js';
+import { findGazedPiece } from './beam/gaze.js';
+import { findPalmLockAngle, palmOutgoingDegrees } from './beam/palm.js';
 import {
   SNAP_STEP_RADIANS,
   angleFromStepsOrDegrees,
@@ -73,22 +75,35 @@ import {
   type Quat,
   type Vec3,
 } from './beam/snap.js';
+import { WristTracker } from './beam/wrist.js';
 import { solveBeam, type BeamHand, type BeamSegment } from './beam/solver.js';
 import {
+  CloseMenuButton,
+  DailyChoiceButton,
   HandMirrorButton,
+  LevelChoiceButton,
+  LevelsButton,
+  OneHandButton,
   RecenterButton,
   RestartButton,
   ResumeButton,
   TutorialButton,
+  TutorialSkipButton,
 } from './components.js';
 import {
   clearTutorial,
+  readDailyWon,
   readHandMirror,
+  readOneHand,
   readProgress,
   readTutorialDone,
+  readUnlocked,
+  writeDailyWon,
   writeHandMirror,
+  writeOneHand,
   writeProgress,
   writeTutorialDone,
+  writeUnlocked,
 } from './storage.js';
 
 const PIECE_Z = 0.02;
@@ -230,9 +245,9 @@ function labelTexture(text: string, fill: string, ink: string): CanvasTexture {
 }
 
 const TUTORIAL_STEPS = [
-  'Poke buttons with your finger',
-  'Pinch a mirror to grab it',
-  'Twist your hand to rotate',
+  'Pinch a mirror to grab',
+  'Twist your wrist to turn it',
+  'Light the target',
 ] as const;
 
 function tutorialCardTexture(text: string): CanvasTexture {
@@ -342,7 +357,13 @@ function pieceDegrees(piece: LivePiece): number {
 export class BoardSystem extends createSystem({
   recenterPressed: { required: [RecenterButton, Pressed] },
   handPressed: { required: [HandMirrorButton, Pressed] },
+  levelsPressed: { required: [LevelsButton, Pressed] },
+  oneHandPressed: { required: [OneHandButton, Pressed] },
+  levelChoicePressed: { required: [LevelChoiceButton, Pressed] },
+  dailyChoicePressed: { required: [DailyChoiceButton, Pressed] },
+  closeMenuPressed: { required: [CloseMenuButton, Pressed] },
   tutorialPressed: { required: [TutorialButton, Pressed] },
+  tutorialSkipPressed: { required: [TutorialSkipButton, Pressed] },
   resumePressed: { required: [ResumeButton, Pressed] },
   restartPressed: { required: [RestartButton, Pressed] },
 }) {
@@ -359,6 +380,8 @@ export class BoardSystem extends createSystem({
   private boardEntity: Entity | null = null;
   private boardMaterial!: MeshStandardMaterial;
   private handMaterial!: MeshBasicMaterial;
+  private levelsMaterial!: MeshBasicMaterial;
+  private oneHandMaterial!: MeshBasicMaterial;
   private banner!: Mesh;
   private pausedCard!: Mesh;
   private resumeButtonMesh!: Mesh;
@@ -398,6 +421,10 @@ export class BoardSystem extends createSystem({
   private handEnabled = false;
   private handLocked = false;
   private handSpec: BeamHand | null = null;
+  private simulatedPalm: { x: number; y: number } | null = null;
+  private handIntercepting = false;
+  private handLockedAngle: number | null = null;
+  private handLockedTarget: number | null = null;
   private hookPaused = false;
   private hookHeld: LivePiece | null = null;
   private pinchHeldPiece: LivePiece | null = null;
@@ -409,19 +436,57 @@ export class BoardSystem extends createSystem({
   private lit: boolean[] = [];
   private recenterMesh: Mesh | null = null;
   private handMesh: Mesh | null = null;
+  private levelsMesh: Mesh | null = null;
+  private oneHandMesh: Mesh | null = null;
   private centerPresses = 0;
   private handPresses = 0;
+  private levelsPresses = 0;
+  private oneHandPresses = 0;
   private lastCenterPress = -Infinity;
   private lastHandPress = -Infinity;
+  private lastLevelsPress = -Infinity;
+  private lastOneHandPress = -Infinity;
+
+  private unlockedCount = 1;
+  private menuVisible = false;
+  private readonly menuGroup = new Group();
+  private readonly menuLevelMeshes: Mesh[] = [];
+  private readonly menuLevelEntities: Entity[] = [];
+  private menuDailyMesh: Mesh | null = null;
+  private menuDailyEntity: Entity | null = null;
+  private menuCloseMesh: Mesh | null = null;
+  private menuCloseEntity: Entity | null = null;
+  private isDaily = false;
+  private dailyDateStr = '';
+  private lastMenuPress = -Infinity;
+
+  private oneHandEnabled = false;
+  private oneHandDirection = 1;
+  private pinchDwellTime = 0;
+  private dwellRepeatTimer = 0;
+  private lastPinchReleaseTime = -Infinity;
+  private lastPinchPiece: LivePiece | null = null;
+
+  private gazedPiece: LivePiece | null = null;
+  private gazeAngleDeg: number | null = null;
+  private readonly headForward = new Vector3();
+
+  private readonly wristTracker = new WristTracker();
+  private readonly tempQuat = new Quaternion();
 
   private tutorialCard!: Mesh;
   private tutorialButtonMesh!: Mesh;
   private tutorialButtonMaterial!: MeshBasicMaterial;
+  private tutorialSkipButtonMesh!: Mesh;
+  private tutorialSkipButtonMaterial!: MeshBasicMaterial;
+  private tutorialSkipEntity!: Entity;
   private tutorialStep = 0;
   private tutorialVisible = false;
   private tutorialChecked = false;
   private tutorialPresses = 0;
+  private tutorialSkipPresses = 0;
   private lastTutorialPress = -Infinity;
+  private lastTutorialSkipPress = -Infinity;
 
   private resumePresses = 0;
   private lastResumePress = -Infinity;
@@ -434,6 +499,8 @@ export class BoardSystem extends createSystem({
 
   private recenterEntity: Entity | null = null;
   private handEntity: Entity | null = null;
+  private levelsEntity: Entity | null = null;
+  private oneHandEntity: Entity | null = null;
   private tutorialEntity: Entity | null = null;
   private resumeEntity: Entity | null = null;
   private restartEntity: Entity | null = null;
@@ -458,6 +525,8 @@ export class BoardSystem extends createSystem({
   init(): void {
     const saved = readProgress(localStorage, LEVELS.length);
     this.handEnabled = readHandMirror(localStorage);
+    this.oneHandEnabled = readOneHand(localStorage);
+    this.unlockedCount = readUnlocked(localStorage, Math.max(1, (saved?.level ?? 0) + 1));
     this.levelIndex = saved?.level ?? 0;
     this.buildStatic();
     this.loadLevel(this.levelIndex, saved?.angles ?? null);
@@ -470,9 +539,36 @@ export class BoardSystem extends createSystem({
         if (!this.inputSettled || !this.isPressNearButton(this.handMesh)) return;
         this.toggleHandMirror();
       }),
+      this.queries.levelsPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.levelsMesh)) return;
+        this.toggleMenu();
+      }),
+      this.queries.oneHandPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.oneHandMesh)) return;
+        this.toggleOneHand();
+      }),
+      this.queries.levelChoicePressed.subscribe('qualify', (entity) => {
+        const idx = this.menuLevelEntities.indexOf(entity);
+        if (idx === -1) return;
+        const mesh = this.menuLevelMeshes[idx];
+        if (!this.inputSettled || !this.isPressNearButton(mesh ?? null)) return;
+        this.selectLevelFromMenu(idx);
+      }),
+      this.queries.dailyChoicePressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.menuDailyMesh)) return;
+        this.selectDailyFromMenu();
+      }),
+      this.queries.closeMenuPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.menuCloseMesh)) return;
+        this.toggleMenu();
+      }),
       this.queries.tutorialPressed.subscribe('qualify', () => {
         if (!this.inputSettled || !this.isPressNearButton(this.tutorialButtonMesh)) return;
         this.advanceTutorial();
+      }),
+      this.queries.tutorialSkipPressed.subscribe('qualify', () => {
+        if (!this.inputSettled || !this.isPressNearButton(this.tutorialSkipButtonMesh)) return;
+        this.skipTutorial();
       }),
       this.queries.resumePressed.subscribe('qualify', () => {
         if (!this.inputSettled || !this.isPressNearButton(this.resumeButtonMesh)) return;
@@ -491,6 +587,8 @@ export class BoardSystem extends createSystem({
     document.addEventListener('visibilitychange', onDocumentVisibility);
     const resumeAudio = () => this.audio.interact();
     window.addEventListener('pointerdown', resumeAudio);
+    window.addEventListener('click', resumeAudio);
+    window.addEventListener('touchstart', resumeAudio);
     this.cleanupFuncs.push(
       this.visibilityState.subscribe((state) => {
         const prev = this.xrState;
@@ -520,6 +618,8 @@ export class BoardSystem extends createSystem({
       }),
       () => document.removeEventListener('visibilitychange', onDocumentVisibility),
       () => window.removeEventListener('pointerdown', resumeAudio),
+      () => window.removeEventListener('click', resumeAudio),
+      () => window.removeEventListener('touchstart', resumeAudio),
     );
     this.xrState = this.visibilityState.value;
     this.applyPause();
@@ -540,6 +640,9 @@ export class BoardSystem extends createSystem({
 
     this.lastCenterPress = -Infinity;
     this.lastHandPress = -Infinity;
+    this.lastLevelsPress = -Infinity;
+    this.lastOneHandPress = -Infinity;
+    this.lastMenuPress = -Infinity;
     this.lastTutorialPress = -Infinity;
     this.lastResumePress = -Infinity;
     this.lastRestartPress = -Infinity;
@@ -547,9 +650,14 @@ export class BoardSystem extends createSystem({
     for (const entity of [
       this.recenterEntity,
       this.handEntity,
+      this.levelsEntity,
+      this.oneHandEntity,
       this.tutorialEntity,
       this.resumeEntity,
       this.restartEntity,
+      ...this.menuLevelEntities,
+      this.menuDailyEntity,
+      this.menuCloseEntity,
     ]) {
       if (entity?.hasComponent(Pressed)) {
         entity.removeComponent(Pressed);
@@ -618,14 +726,31 @@ export class BoardSystem extends createSystem({
       this.tutorialVisible = false;
       if (this.tutorialCard) this.tutorialCard.visible = false;
       if (this.tutorialButtonMesh) this.tutorialButtonMesh.visible = false;
+      if (this.tutorialSkipButtonMesh) this.tutorialSkipButtonMesh.visible = false;
       writeTutorialDone(localStorage);
     }
   }
 
+  private skipTutorial(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
+    if (!this.tutorialVisible) return;
+    const now = performance.now();
+    if (!bypassDebounce && now - this.lastTutorialSkipPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastTutorialSkipPress = now;
+    this.tutorialSkipPresses += 1;
+    this.audio.interact();
+    this.tutorialVisible = false;
+    if (this.tutorialCard) this.tutorialCard.visible = false;
+    if (this.tutorialButtonMesh) this.tutorialButtonMesh.visible = false;
+    if (this.tutorialSkipButtonMesh) this.tutorialSkipButtonMesh.visible = false;
+    writeTutorialDone(localStorage);
+  }
+
   private updateTutorialCard(): void {
-    if (!this.tutorialCard || !this.tutorialButtonMesh) return;
+    if (!this.tutorialCard || !this.tutorialButtonMesh || !this.tutorialSkipButtonMesh) return;
     this.tutorialCard.visible = this.tutorialVisible;
     this.tutorialButtonMesh.visible = this.tutorialVisible;
+    this.tutorialSkipButtonMesh.visible = this.tutorialVisible;
     if (!this.tutorialVisible) return;
     const cardMat = this.tutorialCard.material;
     if (cardMat instanceof MeshBasicMaterial) {
@@ -685,6 +810,33 @@ export class BoardSystem extends createSystem({
       this.integrateWin(delta);
       if (this.won) this.anim += delta;
       this.updateLevel1Cue(delta);
+      this.updateGaze();
+
+      if (this.tutorialVisible && this.inputSettled) {
+        if (this.tutorialStep === 0) {
+          const held = this.active ?? this.pinchHeldPiece ?? this.grabbedPiece();
+          if (held) {
+            this.tutorialStep = 1;
+            this.updateTutorialCard();
+          }
+        } else if (this.tutorialStep === 1) {
+          if (
+            this.wristTracker.state().appliedSteps !== 0 ||
+            (this.active && this.active.committed !== this.startAngle)
+          ) {
+            this.tutorialStep = 2;
+            this.updateTutorialCard();
+          }
+        } else if (this.tutorialStep === 2) {
+          if (this.won) {
+            this.tutorialVisible = false;
+            if (this.tutorialCard) this.tutorialCard.visible = false;
+            if (this.tutorialButtonMesh) this.tutorialButtonMesh.visible = false;
+            if (this.tutorialSkipButtonMesh) this.tutorialSkipButtonMesh.visible = false;
+            writeTutorialDone(localStorage);
+          }
+        }
+      }
     }
     this.layoutPieces();
     this.frameDesktopPreview();
@@ -703,9 +855,15 @@ export class BoardSystem extends createSystem({
     const buttons = [
       this.recenterMesh,
       this.handMesh,
+      this.levelsMesh,
+      this.oneHandMesh,
       this.tutorialButtonMesh,
+      this.tutorialSkipButtonMesh,
       this.resumeButtonMesh,
       this.restartButtonMesh,
+      ...this.menuLevelMeshes,
+      this.menuDailyMesh,
+      this.menuCloseMesh,
     ].filter((b): b is Mesh => Boolean(b && b.visible));
 
     for (const space of handSpaces) {
@@ -746,9 +904,14 @@ export class BoardSystem extends createSystem({
       for (const entity of [
         this.recenterEntity,
         this.handEntity,
+        this.levelsEntity,
+        this.oneHandEntity,
         this.tutorialEntity,
         this.resumeEntity,
         this.restartEntity,
+        ...this.menuLevelEntities,
+        this.menuDailyEntity,
+        this.menuCloseEntity,
       ]) {
         if (entity?.hasComponent(Pressed)) {
           entity.removeComponent(Pressed);
@@ -861,11 +1024,12 @@ export class BoardSystem extends createSystem({
       this.levelLabel,
       this.handDisc,
       this.level1Cue,
+      this.menuGroup,
     );
     this.boardEntity = this.world.createTransformEntity(this.board, { persistent: true });
 
     const shelf = new Mesh(
-      new BoxGeometry(EDGE_BUTTON_WIDTH * 2 + 0.08, EDGE_BUTTON_HEIGHT + 0.016, 0.01),
+      new BoxGeometry(0.38, EDGE_BUTTON_HEIGHT + 0.016, 0.01),
       this.boardMaterial,
     );
     shelf.name = 'button-shelf';
@@ -873,10 +1037,29 @@ export class BoardSystem extends createSystem({
     this.board.add(shelf);
 
     const buttonGeometry = new BoxGeometry(
-      EDGE_BUTTON_WIDTH,
+      0.076,
       EDGE_BUTTON_HEIGHT,
       EDGE_BUTTON_DEPTH,
     );
+
+    this.levelsMaterial = new MeshBasicMaterial({
+      map: labelTexture('Levels', '#9ec3d6', '#0c1824'),
+    });
+    const levelsBtn = new Mesh(buttonGeometry, this.levelsMaterial);
+    levelsBtn.name = 'levels';
+    levelsBtn.position.set(-0.135, EDGE_BUTTON_Y, 0.012);
+    levelsBtn.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.toggleMenu();
+    });
+    this.levelsMesh = levelsBtn;
+    const levelsEntity = this.world.createTransformEntity(levelsBtn, {
+      parent: this.boardEntity,
+    });
+    levelsEntity.addComponent(PokeInteractable);
+    levelsEntity.addComponent(LevelsButton);
+    this.levelsEntity = levelsEntity;
+
     const recenter = new Mesh(
       buttonGeometry,
       new MeshBasicMaterial({
@@ -884,7 +1067,7 @@ export class BoardSystem extends createSystem({
       }),
     );
     recenter.name = 'recenter';
-    recenter.position.set(-0.07, EDGE_BUTTON_Y, 0.012);
+    recenter.position.set(-0.045, EDGE_BUTTON_Y, 0.012);
     recenter.addEventListener('pointerdown', () => {
       if (!this.inputSettled) return;
       this.recenter();
@@ -902,7 +1085,7 @@ export class BoardSystem extends createSystem({
     });
     const hand = new Mesh(buttonGeometry, this.handMaterial);
     hand.name = 'hand-mirror';
-    hand.position.set(0.07, EDGE_BUTTON_Y, 0.012);
+    hand.position.set(0.045, EDGE_BUTTON_Y, 0.012);
     hand.addEventListener('pointerdown', () => {
       if (!this.inputSettled) return;
       this.toggleHandMirror();
@@ -914,14 +1097,128 @@ export class BoardSystem extends createSystem({
     this.handEntity = handEntity;
     this.paintHandButton();
 
+    this.oneHandMaterial = new MeshBasicMaterial({
+      map: labelTexture('1-Hand', '#2a3848', '#8fa4b8'),
+    });
+    const oneHandBtn = new Mesh(buttonGeometry, this.oneHandMaterial);
+    oneHandBtn.name = 'one-hand';
+    oneHandBtn.position.set(0.135, EDGE_BUTTON_Y, 0.012);
+    oneHandBtn.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.toggleOneHand();
+    });
+    this.oneHandMesh = oneHandBtn;
+    const oneHandEntity = this.world.createTransformEntity(oneHandBtn, {
+      parent: this.boardEntity,
+    });
+    oneHandEntity.addComponent(PokeInteractable);
+    oneHandEntity.addComponent(OneHandButton);
+    this.oneHandEntity = oneHandEntity;
+    this.paintOneHandButton();
+
+    // In-XR Level Menu Panel
+    this.menuGroup.name = 'level-menu';
+    this.menuGroup.position.set(0, 0.015, 0.055);
+    this.menuGroup.visible = false;
+
+    const menuCard = new Mesh(
+      new PlaneGeometry(0.32, 0.22),
+      new MeshBasicMaterial({
+        map: panelCardTexture('Levels', '#102033', '#f4f7fb', 56),
+        transparent: true,
+        side: DoubleSide,
+      }),
+    );
+    this.menuGroup.add(menuCard);
+
+    const levelBtnGeom = new BoxGeometry(0.072, 0.034, 0.016);
+    const colXs = [-0.09, 0.0, 0.09];
+    const rowYs = [0.018, -0.026];
+
+    for (let i = 0; i < 6; i += 1) {
+      const col = i % 3;
+      const row = Math.floor(i / 3);
+      const isUnlocked = i < this.unlockedCount;
+      const isCurrent = i === this.levelIndex && !this.isDaily;
+      const btnMat = new MeshBasicMaterial({
+        map: labelTexture(
+          String(i + 1),
+          isCurrent ? '#3dffb0' : isUnlocked ? '#ffe14a' : '#1c2836',
+          isCurrent ? '#04140c' : isUnlocked ? '#1a1000' : '#55687d',
+        ),
+      });
+      const btnMesh = new Mesh(levelBtnGeom, btnMat);
+      btnMesh.name = `menu-level-${i + 1}`;
+      btnMesh.position.set(colXs[col]!, rowYs[row]!, 0.012).add(this.menuGroup.position);
+      btnMesh.visible = false;
+      btnMesh.addEventListener('pointerdown', () => {
+        if (!this.inputSettled) return;
+        this.selectLevelFromMenu(i);
+      });
+      this.menuGroup.add(btnMesh);
+      this.menuLevelMeshes.push(btnMesh);
+
+      const btnEntity = this.world.createTransformEntity(btnMesh, { parent: this.boardEntity });
+      btnEntity.addComponent(PokeInteractable);
+      btnEntity.addComponent(LevelChoiceButton);
+      this.menuLevelEntities.push(btnEntity);
+    }
+
+    const dailyWon = readDailyWon(localStorage, localDateString());
+    const dailyMat = new MeshBasicMaterial({
+      map: labelTexture(
+        dailyWon ? 'Daily ✓' : 'Daily',
+        dailyWon ? '#12382a' : '#3dffb0',
+        dailyWon ? '#d9ffe9' : '#04140c',
+      ),
+    });
+    const dailyGeom = new BoxGeometry(0.11, 0.034, 0.016);
+    const dailyMesh = new Mesh(dailyGeom, dailyMat);
+    dailyMesh.name = 'menu-daily';
+    dailyMesh.position.set(-0.045, -0.07, 0.012).add(this.menuGroup.position);
+    dailyMesh.visible = false;
+    dailyMesh.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.selectDailyFromMenu();
+    });
+    this.menuGroup.add(dailyMesh);
+    this.menuDailyMesh = dailyMesh;
+    const dailyEntity = this.world.createTransformEntity(dailyMesh, { parent: this.boardEntity });
+    dailyEntity.addComponent(PokeInteractable);
+    dailyEntity.addComponent(DailyChoiceButton);
+    this.menuDailyEntity = dailyEntity;
+
+    const closeMat = new MeshBasicMaterial({
+      map: labelTexture('Close', '#3a4a5e', '#f4f7fb'),
+    });
+    const closeGeom = new BoxGeometry(0.075, 0.034, 0.016);
+    const closeMesh = new Mesh(closeGeom, closeMat);
+    closeMesh.name = 'menu-close';
+    closeMesh.position.set(0.07, -0.07, 0.012).add(this.menuGroup.position);
+    closeMesh.visible = false;
+    closeMesh.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.toggleMenu();
+    });
+    this.menuGroup.add(closeMesh);
+    this.menuCloseMesh = closeMesh;
+    const closeEntity = this.world.createTransformEntity(closeMesh, { parent: this.boardEntity });
+    closeEntity.addComponent(PokeInteractable);
+    closeEntity.addComponent(CloseMenuButton);
+    this.menuCloseEntity = closeEntity;
+
     this.tutorialButtonMaterial = new MeshBasicMaterial({
       map: labelTexture('Next', '#ffe14a', '#1a1000'),
     });
-    const tutorialBtnGeom = new BoxGeometry(0.075, 0.025, 0.016);
+    const tutorialBtnGeom = new BoxGeometry(0.088, 0.025, 0.016);
     const tutorialBtn = new Mesh(tutorialBtnGeom, this.tutorialButtonMaterial);
     tutorialBtn.name = 'tutorial-button';
-    tutorialBtn.position.set(0, BOARD_HEIGHT / 2 + 0.038, 0.026);
+    tutorialBtn.position.set(0.055, BOARD_HEIGHT / 2 + 0.038, 0.026);
     tutorialBtn.visible = false;
+    tutorialBtn.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.advanceTutorial();
+    });
     this.tutorialButtonMesh = tutorialBtn;
     const tutorialEntity = this.world.createTransformEntity(tutorialBtn, {
       parent: this.boardEntity,
@@ -929,6 +1226,26 @@ export class BoardSystem extends createSystem({
     tutorialEntity.addComponent(PokeInteractable);
     tutorialEntity.addComponent(TutorialButton);
     this.tutorialEntity = tutorialEntity;
+
+    this.tutorialSkipButtonMaterial = new MeshBasicMaterial({
+      map: labelTexture('Skip', '#d0d7de', '#161b22'),
+    });
+    const tutorialSkipBtnGeom = new BoxGeometry(0.088, 0.025, 0.016);
+    const tutorialSkipBtn = new Mesh(tutorialSkipBtnGeom, this.tutorialSkipButtonMaterial);
+    tutorialSkipBtn.name = 'tutorial-skip-button';
+    tutorialSkipBtn.position.set(-0.055, BOARD_HEIGHT / 2 + 0.038, 0.026);
+    tutorialSkipBtn.visible = false;
+    tutorialSkipBtn.addEventListener('pointerdown', () => {
+      if (!this.inputSettled) return;
+      this.skipTutorial();
+    });
+    this.tutorialSkipButtonMesh = tutorialSkipBtn;
+    const tutorialSkipEntity = this.world.createTransformEntity(tutorialSkipBtn, {
+      parent: this.boardEntity,
+    });
+    tutorialSkipEntity.addComponent(PokeInteractable);
+    tutorialSkipEntity.addComponent(TutorialSkipButton);
+    this.tutorialSkipEntity = tutorialSkipEntity;
 
     const resumeBtnGeom = new BoxGeometry(0.09, 0.032, 0.018);
     const resumeBtn = new Mesh(
@@ -978,13 +1295,29 @@ export class BoardSystem extends createSystem({
   private loadLevel(index: number, angles: number[] | null): void {
     const level = LEVELS[index] ?? LEVELS[0];
     if (!level) return;
-    this.level = level;
+    this.isDaily = false;
     this.levelIndex = LEVELS.indexOf(level);
+    this.loadLevelDef(level, angles);
+  }
+
+  private loadDaily(dateStr?: string): void {
+    const targetDate = dateStr ?? localDateString();
+    const dailyDef = generateDaily(targetDate);
+    this.isDaily = true;
+    this.dailyDateStr = targetDate;
+    this.loadLevelDef(dailyDef, null);
+  }
+
+  private loadLevelDef(level: LevelDef, angles: number[] | null): void {
+    this.level = level;
     this.won = false;
     this.winPlayed = false;
     this.winHold = 0;
     this.anim = 0;
     this.handLocked = false;
+    this.handLockedAngle = null;
+    this.handLockedTarget = null;
+    this.handIntercepting = false;
     this.handSpec = null;
     this.beamKey = '';
     this.endTwist();
@@ -1006,7 +1339,116 @@ export class BoardSystem extends createSystem({
     if (this.restartButtonMesh) this.restartButtonMesh.visible = false;
     this.hookHeld = null;
     this.syncBeam();
-    this.save();
+    if (!this.isDaily) this.save();
+    this.updateMenuButtons();
+  }
+
+  private setMenuVisible(visible: boolean): void {
+    this.menuVisible = visible;
+    this.menuGroup.visible = visible;
+    // Menu buttons are parented to the board entity (for poke), not the group,
+    // so their visibility (and poke hit tests) follow the menu explicitly.
+    for (const mesh of [...this.menuLevelMeshes, this.menuDailyMesh, this.menuCloseMesh]) {
+      if (mesh) mesh.visible = visible;
+    }
+    if (visible) {
+      this.updateMenuButtons();
+    }
+  }
+
+  private toggleMenu(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
+    if (this.tutorialVisible) return;
+    const now = performance.now();
+    if (!bypassDebounce && now - this.lastLevelsPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastLevelsPress = now;
+    this.levelsPresses += 1;
+    this.audio.interact();
+    this.setMenuVisible(!this.menuVisible);
+  }
+
+  private selectLevelFromMenu(index: number, bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
+    if (index < 0 || index >= LEVELS.length) return;
+    if (index >= this.unlockedCount) return;
+    const now = performance.now();
+    if (!bypassDebounce && now - this.lastMenuPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastMenuPress = now;
+    this.audio.interact();
+    this.loadLevel(index, null);
+    this.setMenuVisible(false);
+  }
+
+  private selectDailyFromMenu(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
+    const now = performance.now();
+    if (!bypassDebounce && now - this.lastMenuPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastMenuPress = now;
+    this.audio.interact();
+    this.loadDaily();
+    this.setMenuVisible(false);
+  }
+
+  private updateMenuButtons(): void {
+    const dailyWon = readDailyWon(localStorage, localDateString());
+    for (let i = 0; i < 6; i += 1) {
+      const mesh = this.menuLevelMeshes[i];
+      if (!mesh) continue;
+      const mat = mesh.material;
+      if (!(mat instanceof MeshBasicMaterial)) continue;
+      const isUnlocked = i < this.unlockedCount;
+      const isCurrent = i === this.levelIndex && !this.isDaily;
+      mat.map?.dispose();
+      mat.map = labelTexture(
+        isUnlocked ? String(i + 1) : `${i + 1} 🔒`,
+        isCurrent ? '#3dffb0' : isUnlocked ? '#ffe14a' : '#1c2836',
+        isCurrent ? '#04140c' : isUnlocked ? '#1a1000' : '#55687d',
+      );
+      mat.needsUpdate = true;
+    }
+    if (this.menuDailyMesh) {
+      const mat = this.menuDailyMesh.material;
+      if (mat instanceof MeshBasicMaterial) {
+        mat.map?.dispose();
+        mat.map = labelTexture(
+          dailyWon ? 'Daily ✓' : 'Daily',
+          dailyWon ? '#12382a' : '#3dffb0',
+          dailyWon ? '#d9ffe9' : '#04140c',
+        );
+        mat.needsUpdate = true;
+      }
+    }
+  }
+
+  private setOneHand(enabled: boolean): void {
+    this.oneHandEnabled = enabled;
+    writeOneHand(localStorage, enabled);
+    this.paintOneHandButton();
+  }
+
+  private toggleOneHand(bypassDebounce = false): void {
+    if (!bypassDebounce && !this.inputSettled) return;
+    if (this.tutorialVisible) return;
+    const now = performance.now();
+    if (!bypassDebounce && now - this.lastOneHandPress < BUTTON_DEBOUNCE_MS) return;
+    this.lastOneHandPress = now;
+    this.oneHandPresses += 1;
+    this.audio.interact();
+    this.setOneHand(!this.oneHandEnabled);
+  }
+
+  private paintOneHandButton(): void {
+    if (!this.oneHandMesh) return;
+    const mat = this.oneHandMesh.material;
+    if (mat instanceof MeshBasicMaterial) {
+      mat.map?.dispose();
+      mat.map = labelTexture(
+        '1-Hand',
+        this.oneHandEnabled ? '#ffe14a' : '#2a3848',
+        this.oneHandEnabled ? '#1a1000' : '#8fa4b8',
+      );
+      mat.needsUpdate = true;
+    }
   }
 
   private clearLevel(): void {
@@ -1067,6 +1509,19 @@ export class BoardSystem extends createSystem({
       highlight.position.z = -0.008;
       highlight.visible = false;
       group.add(highlight);
+      const gazeHighlight = new Mesh(
+        highlightGeometry,
+        new MeshBasicMaterial({
+          color: 0x7ae0ff,
+          transparent: true,
+          opacity: 0.45,
+        }),
+      );
+      gazeHighlight.name = 'gaze-highlight';
+      gazeHighlight.rotation.x = Math.PI / 2;
+      gazeHighlight.position.z = -0.009;
+      gazeHighlight.visible = false;
+      group.add(gazeHighlight);
     }
     group.position.set(center.x, center.y, piece.type === 'blocker' ? 0.03 : PIECE_Z);
     if (piece.type !== 'blocker') group.rotation.z = radians;
@@ -1121,7 +1576,7 @@ export class BoardSystem extends createSystem({
     const material = this.levelLabel.material;
     if (!(material instanceof MeshBasicMaterial)) return;
     material.map?.dispose();
-    material.map = labelTexture(this.level.id, '#102033', '#d5e4f5');
+    material.map = labelTexture(this.isDaily ? 'Daily' : this.level.id, '#102033', '#d5e4f5');
     material.needsUpdate = true;
   }
 
@@ -1163,6 +1618,9 @@ export class BoardSystem extends createSystem({
     if (this.endPanelVisible) {
       if (this.endCard) this.endCard.visible = !paused;
       if (this.restartButtonMesh) this.restartButtonMesh.visible = !paused;
+    }
+    if (this.menuGroup) {
+      this.menuGroup.visible = !paused && this.menuVisible;
     }
     if (!paused) return;
     this.endTwist();
@@ -1244,12 +1702,17 @@ export class BoardSystem extends createSystem({
       const center = cellCenter(piece.col, piece.row);
       piece.object.position.set(center.x, center.y, piece.type === 'blocker' ? 0.03 : PIECE_Z);
       if (piece.type !== 'blocker') piece.object.rotation.set(0, 0, piece.committed);
+      const isHeld =
+        piece.entity?.hasComponent(Grabbed) === true ||
+        piece === this.pinchHeldPiece ||
+        piece === this.hookHeld;
       const highlight = piece.object.getObjectByName('grabbed');
       if (highlight) {
-        highlight.visible =
-          piece.entity?.hasComponent(Grabbed) === true ||
-          piece === this.pinchHeldPiece ||
-          piece === this.hookHeld;
+        highlight.visible = isHeld;
+      }
+      const gazeHighlight = piece.object.getObjectByName('gaze-highlight');
+      if (gazeHighlight) {
+        gazeHighlight.visible = !isHeld && piece === this.gazedPiece;
       }
     }
     if (this.handEnabled) {
@@ -1267,6 +1730,30 @@ export class BoardSystem extends createSystem({
     } else {
       this.handDisc.visible = false;
     }
+  }
+
+  private updateGaze(): void {
+    this.player.head.updateWorldMatrix(true, false);
+    this.headPos.setFromMatrixPosition(this.player.head.matrixWorld);
+    this.headForward.set(0, 0, -1).transformDirection(this.player.head.matrixWorld).normalize();
+
+    const movableList = this.pieces
+      .filter((p) => p.movable)
+      .map((p) => {
+        p.object.updateWorldMatrix(true, false);
+        this.scratch.setFromMatrixPosition(p.object.matrixWorld);
+        return {
+          piece: p,
+          id: pieceId(p),
+          x: this.scratch.x,
+          y: this.scratch.y,
+          z: this.scratch.z,
+        };
+      });
+
+    const res = findGazedPiece(this.headPos, this.headForward, movableList, 10);
+    this.gazedPiece = res?.piece.piece ?? null;
+    this.gazeAngleDeg = res?.angleDeg ?? null;
   }
 
   private updateLevel1Cue(delta: number): void {
@@ -1303,7 +1790,12 @@ export class BoardSystem extends createSystem({
         this.syncBeam();
       }
       this.save();
+      this.lastPinchPiece = this.active;
+      this.lastPinchReleaseTime = performance.now();
     }
+    this.wristTracker.onRelease();
+    this.pinchDwellTime = 0;
+    this.dwellRepeatTimer = 0;
     this.twisting = false;
     this.active = null;
     this.pinchHeldPiece = null;
@@ -1343,13 +1835,16 @@ export class BoardSystem extends createSystem({
     const grabbed = this.grabbedPiece();
     if (grabbed?.entity) {
       const hand = this.world.getSystem(GrabSystem)?.getHolderHand(grabbed.entity);
-      if ((hand === 'left' || hand === 'right') && this.input.xr.isPrimary('hand', hand)) {
+      if (
+        (hand === 'left' || hand === 'right') &&
+        (this.oneHandEnabled || this.input.xr.isPrimary('hand', hand))
+      ) {
         return { piece: grabbed, hand };
       }
     }
     if (this.pinchHeldPiece && this.pinchHand) {
       if (
-        this.input.xr.isPrimary('hand', this.pinchHand) &&
+        (this.oneHandEnabled || this.input.xr.isPrimary('hand', this.pinchHand)) &&
         this.input.xr.getSelectState(this.pinchHand).active
       ) {
         return { piece: this.pinchHeldPiece, hand: this.pinchHand };
@@ -1358,14 +1853,25 @@ export class BoardSystem extends createSystem({
       this.pinchHand = null;
     }
     for (const hand of ['right', 'left'] as const) {
-      if (!this.input.xr.isPrimary('hand', hand)) continue;
+      if (!this.oneHandEnabled && !this.input.xr.isPrimary('hand', hand)) continue;
       const select = this.input.xr.getSelectState(hand);
       if (select.active || select.start) {
         const nearest = this.findNearestMovablePiece(hand);
-        if (nearest) {
-          this.pinchHeldPiece = nearest;
+        const target = nearest ?? this.gazedPiece;
+        if (target) {
+          if (this.oneHandEnabled && select.start) {
+            const now = performance.now();
+            if (now - this.lastPinchReleaseTime < 400 && this.lastPinchPiece === target) {
+              this.oneHandDirection = -this.oneHandDirection;
+              this.audio.tick();
+            }
+            this.pinchDwellTime = 0;
+            this.dwellRepeatTimer = 0;
+          }
+          this.pinchHeldPiece = target;
           this.pinchHand = hand;
-          return { piece: nearest, hand };
+          this.audio.interact();
+          return { piece: target, hand };
         }
       }
     }
@@ -1380,10 +1886,60 @@ export class BoardSystem extends createSystem({
     }
     const { piece, hand } = active;
     this.readBoardAxes();
-    const grip = this.player.gripSpaces[hand];
-    grip.updateWorldMatrix(true, false);
-    this.readQuat(grip, this.gripNow);
-    this.currentGripPos.setFromMatrixPosition(grip.matrixWorld);
+
+    let hasJointPose = false;
+    const session = this.xrManager?.getSession?.();
+    const frame = this.xrManager?.getFrame?.() ?? (this as any).xrFrame;
+    const refSpace = this.xrManager?.getReferenceSpace?.();
+
+    if (frame && refSpace && session?.inputSources) {
+      for (const source of session.inputSources) {
+        if (source.handedness === hand && (source as any).hand) {
+          const xrHand = (source as any).hand;
+          const joint = typeof xrHand.get === 'function' ? xrHand.get('wrist') : null;
+          if (joint) {
+            const pose =
+              typeof frame.getJointPose === 'function'
+                ? frame.getJointPose(joint, refSpace)
+                : typeof frame.getPose === 'function'
+                ? frame.getPose(joint, refSpace)
+                : null;
+            if (pose) {
+              hasJointPose = true;
+              this.player.updateWorldMatrix(true, false);
+              this.currentGripPos
+                .set(
+                  pose.transform.position.x,
+                  pose.transform.position.y,
+                  pose.transform.position.z,
+                )
+                .applyMatrix4(this.player.matrixWorld);
+
+              this.scratchQuat.set(
+                pose.transform.orientation.x,
+                pose.transform.orientation.y,
+                pose.transform.orientation.z,
+                pose.transform.orientation.w,
+              );
+              this.player.getWorldQuaternion(this.tempQuat);
+              this.scratchQuat.premultiply(this.tempQuat);
+              this.gripNow.x = this.scratchQuat.x;
+              this.gripNow.y = this.scratchQuat.y;
+              this.gripNow.z = this.scratchQuat.z;
+              this.gripNow.w = this.scratchQuat.w;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (!hasJointPose) {
+      const grip = this.player.gripSpaces[hand];
+      grip.updateWorldMatrix(true, false);
+      this.readQuat(grip, this.gripNow);
+      this.currentGripPos.setFromMatrixPosition(grip.matrixWorld);
+    }
 
     if (!this.twisting || this.active !== piece) {
       this.twisting = true;
@@ -1393,31 +1949,30 @@ export class BoardSystem extends createSystem({
       this.copyQuat(this.gripNow, this.lastGripQuat);
       this.lastGripPos.copy(this.currentGripPos);
       piece.smoothed = piece.committed;
+      this.wristTracker.onGrab(piece.committed, this.gripNow, this.currentGripPos);
       return;
     }
 
-    const posJump = this.currentGripPos.distanceTo(this.lastGripPos) > TRACKING_MOVE_JUMP;
-    const dot = Math.abs(
-      this.lastGripQuat.x * this.gripNow.x +
-      this.lastGripQuat.y * this.gripNow.y +
-      this.lastGripQuat.z * this.gripNow.z +
-      this.lastGripQuat.w * this.gripNow.w,
-    );
-    const frameRot = 2 * Math.acos(Math.min(1, Math.max(-1, dot)));
-    const frameTwist = Math.abs(signedTwist(this.lastGripQuat, this.gripNow, this.normal));
-    const rotJump = frameRot > TRACKING_JUMP || frameTwist > TRACKING_JUMP;
-
-    if (posJump || rotJump) {
-      this.startAngle = piece.committed;
-      this.copyQuat(this.gripNow, this.startGrip);
-      piece.smoothed = piece.committed;
+    if (this.oneHandEnabled) {
+      this.pinchDwellTime += delta;
+      if (this.pinchDwellTime >= 0.6) {
+        if (this.pinchDwellTime - delta < 0.6) {
+          this.applySteps(piece, this.oneHandDirection);
+          this.dwellRepeatTimer = 0;
+        } else {
+          this.dwellRepeatTimer += delta;
+          if (this.dwellRepeatTimer >= 0.4) {
+            this.applySteps(piece, this.oneHandDirection);
+            this.dwellRepeatTimer = 0;
+          }
+        }
+      }
     }
 
-    const twist = signedTwist(this.startGrip, this.gripNow, this.normal);
-    piece.smoothed = smoothAngle(piece.smoothed, this.startAngle + twist, delta);
-    const next = snapWithHysteresis(piece.smoothed, piece.committed);
-    if (next !== piece.committed) {
-      piece.committed = next;
+    const res = this.wristTracker.update(this.gripNow, this.currentGripPos, delta);
+    if (res.changed) {
+      piece.committed = res.pieceAngle;
+      piece.smoothed = res.pieceAngle;
       this.audio.tick();
       this.save();
       this.syncBeam();
@@ -1458,6 +2013,10 @@ export class BoardSystem extends createSystem({
   private integrateHand(): void {
     if (!this.handEnabled) {
       this.lastPalm = null;
+      this.simulatedPalm = null;
+      this.handIntercepting = false;
+      this.handLockedAngle = null;
+      this.handLockedTarget = null;
       if (this.handSpec) {
         this.handSpec = null;
         this.handLocked = false;
@@ -1465,48 +2024,91 @@ export class BoardSystem extends createSystem({
       }
       return;
     }
-    if (this.handLocked) return;
-    const palm = this.readPalm();
+
+    const palm = this.simulatedPalm
+      ? { ...this.simulatedPalm, nx: 0, ny: 0, nz: 1 }
+      : this.readPalm();
     this.lastPalm = palm;
+
     if (!palm) {
+      this.handIntercepting = false;
+      this.handLockedAngle = null;
+      this.handLockedTarget = null;
       if (this.handSpec) {
         this.handSpec = null;
         this.syncBeam();
       }
       return;
     }
+
     const angles = this.angleList();
-    const bare = solveBeam(boardFromLevel(this.level, angles));
+    const bareBoard = boardFromLevel(this.level, angles);
+    const bare = solveBeam(bareBoard);
     const incoming = nearestIncoming(bare.segments, palm.x, palm.y, HAND_CATCH);
+
     if (!incoming) {
+      this.handIntercepting = false;
+      this.handLockedAngle = null;
+      this.handLockedTarget = null;
       if (this.handSpec) {
         this.handSpec = null;
         this.syncBeam();
       }
       return;
     }
-    const dir = palmOutgoingDegrees(incoming.x, incoming.y, palm.nx, palm.ny, palm.nz);
-    if (dir == null) return;
-    const spec: BeamHand = {
-      x: Math.round(palm.x * 200) / 200,
-      y: Math.round(palm.y * 200) / 200,
-      radius: HAND_RADIUS,
-      dir,
-    };
-    const withHand = solveBeam(boardFromLevel(this.level, angles, spec));
-    const bareLit = bare.lit.filter(Boolean).length;
-    const nextLit = withHand.lit.filter(Boolean).length;
-    if (nextLit > bareLit) this.handLocked = true;
-    if (
-      this.handSpec &&
-      this.handSpec.x === spec.x &&
-      this.handSpec.y === spec.y &&
-      this.handSpec.dir === spec.dir
-    ) {
+
+    this.handIntercepting = true;
+    const preferredDir =
+      palm.nx !== 0 || palm.ny !== 0 || palm.nz !== 1
+        ? palmOutgoingDegrees(incoming.x, incoming.y, palm.nx, palm.ny, palm.nz)
+        : null;
+
+    const lock = findPalmLockAngle(bareBoard, palm, incoming, preferredDir, HAND_RADIUS);
+    if (lock) {
+      this.handLockedAngle = lock.angle;
+      this.handLockedTarget = lock.targetIndex;
+      this.handLocked = true;
+      const spec: BeamHand = {
+        x: Math.round(palm.x * 200) / 200,
+        y: Math.round(palm.y * 200) / 200,
+        radius: HAND_RADIUS,
+        dir: lock.angle,
+      };
+      if (
+        !this.handSpec ||
+        this.handSpec.x !== spec.x ||
+        this.handSpec.y !== spec.y ||
+        this.handSpec.dir !== spec.dir
+      ) {
+        this.handSpec = spec;
+        this.syncBeam();
+      }
       return;
     }
-    this.handSpec = spec;
-    this.syncBeam();
+
+    this.handLocked = false;
+    this.handLockedAngle = null;
+    this.handLockedTarget = null;
+    if (preferredDir != null) {
+      const spec: BeamHand = {
+        x: Math.round(palm.x * 200) / 200,
+        y: Math.round(palm.y * 200) / 200,
+        radius: HAND_RADIUS,
+        dir: preferredDir,
+      };
+      if (
+        !this.handSpec ||
+        this.handSpec.x !== spec.x ||
+        this.handSpec.y !== spec.y ||
+        this.handSpec.dir !== spec.dir
+      ) {
+        this.handSpec = spec;
+        this.syncBeam();
+      }
+    } else if (this.handSpec) {
+      this.handSpec = null;
+      this.syncBeam();
+    }
   }
 
   /** Palm center on the board, and the palm normal in board space. Grip +Y faces out of the palm. */
@@ -1516,7 +2118,7 @@ export class BoardSystem extends createSystem({
     let best: { x: number; y: number; nx: number; ny: number; nz: number } | null = null;
     let bestZ = Number.POSITIVE_INFINITY;
     for (const hand of ['left', 'right'] as const) {
-      if (!this.input.xr.isPrimary('hand', hand)) continue;
+      if (!this.oneHandEnabled && !this.input.xr.isPrimary('hand', hand)) continue;
       const grip = this.player.gripSpaces[hand];
       grip.updateWorldMatrix(true, false);
       this.scratch.setFromMatrixPosition(grip.matrixWorld);
@@ -1555,7 +2157,7 @@ export class BoardSystem extends createSystem({
       this.winHold = 0;
       return;
     }
-    if (this.levelIndex >= LEVELS.length - 1 || this.testMode) return;
+    if (this.isDaily || this.levelIndex >= LEVELS.length - 1 || this.testMode) return;
     // A long first frame must not skip the payoff.
     this.winHold += Math.min(delta, 0.05);
     if (this.winHold < WIN_HOLD) return;
@@ -1565,7 +2167,7 @@ export class BoardSystem extends createSystem({
   private syncBeam(): void {
     const angles = this.angleList();
     const hand = this.handSpec;
-    const key = `${this.levelIndex}|${angles.join(',')}|${
+    const key = `${this.isDaily ? 'D' : this.levelIndex}|${angles.join(',')}|${
       hand ? `${hand.x.toFixed(3)}:${hand.y.toFixed(3)}:${hand.dir}` : ''
     }`;
     if (key === this.beamKey) return;
@@ -1578,7 +2180,21 @@ export class BoardSystem extends createSystem({
     this.boardMaterial.emissive.setHex(this.won ? 0x24523a : 0x0c1824);
     this.boardMaterial.emissiveIntensity = this.won ? 0.7 : 0.85;
 
-    const isLastLevel = this.levelIndex >= LEVELS.length - 1;
+    if (this.won) {
+      if (this.isDaily) {
+        writeDailyWon(localStorage, this.dailyDateStr);
+        this.updateMenuButtons();
+      } else {
+        const nextUnlocked = Math.min(LEVELS.length, this.levelIndex + 2);
+        if (nextUnlocked > this.unlockedCount) {
+          this.unlockedCount = nextUnlocked;
+          writeUnlocked(localStorage, this.unlockedCount);
+          this.updateMenuButtons();
+        }
+      }
+    }
+
+    const isLastLevel = !this.isDaily && this.levelIndex >= LEVELS.length - 1;
     if (this.won && isLastLevel) {
       this.endPanelVisible = true;
       if (this.endCard) this.endCard.visible = !this.paused;
@@ -1705,6 +2321,39 @@ export class BoardSystem extends createSystem({
       resume: () => this.hookPause(false),
       resetTutorial: () => this.hookResetTutorial(),
       press: (button: string) => this.hookPress(button),
+      skip: () => this.hookPress('skip'),
+      wrist: (quat: Quat, deltaSeconds?: number) => this.hookFeedWrist(quat, deltaSeconds),
+      menu: (open?: boolean) => {
+        if (typeof open === 'boolean') {
+          this.setMenuVisible(open);
+        } else {
+          this.setMenuVisible(!this.menuVisible);
+        }
+        return this.menuVisible;
+      },
+      daily: (dateStr?: string) => {
+        this.loadDaily(dateStr);
+        return true;
+      },
+      oneHand: (on?: boolean) => {
+        if (typeof on === 'boolean') {
+          this.setOneHand(on);
+        } else {
+          this.setOneHand(!this.oneHandEnabled);
+        }
+        return this.oneHandEnabled;
+      },
+      palm: (x?: number | null, y?: number) => {
+        if (x == null || y === undefined) {
+          this.simulatedPalm = null;
+        } else {
+          this.handEnabled = true;
+          this.paintHandButton();
+          this.simulatedPalm = { x, y };
+        }
+        this.integrateHand();
+        return true;
+      },
     };
     window.beamline = api;
     const onKey = (event: KeyboardEvent) => this.onTestKey(event);
@@ -1743,7 +2392,7 @@ export class BoardSystem extends createSystem({
     } else if (event.code === 'Tab') {
       this.hookCycle(event.shiftKey ? -1 : 1);
     } else if (event.code === 'KeyN') {
-      if (this.levelIndex < LEVELS.length - 1) this.hookLevel(this.levelIndex + 2);
+      if (!this.isDaily && this.levelIndex < LEVELS.length - 1) this.hookLevel(this.levelIndex + 2);
     }
   }
 
@@ -1770,6 +2419,7 @@ export class BoardSystem extends createSystem({
   private hookLevel(n: number): void {
     if (!Number.isInteger(n) || n < 1 || n > LEVELS.length) return;
     this.hookPaused = false;
+    this.isDaily = false;
     const saved = readProgress(localStorage, LEVELS.length);
     const angles = saved?.level === n - 1 ? saved.angles : null;
     this.loadLevel(n - 1, angles);
@@ -1938,6 +2588,29 @@ export class BoardSystem extends createSystem({
     this.updateTutorialCard();
   }
 
+  private hookFeedWrist(quat: Quat, deltaSeconds = 0.016): boolean {
+    const active = this.active ?? this.pinchHeldPiece ?? this.grabbedPiece();
+    if (!active) return false;
+    if (!this.twisting || this.active !== active) {
+      this.twisting = true;
+      this.active = active;
+      this.startAngle = active.committed;
+      this.copyQuat(quat, this.startGrip);
+      this.copyQuat(quat, this.lastGripQuat);
+      active.smoothed = active.committed;
+      this.wristTracker.onGrab(active.committed, quat, null);
+    }
+    const res = this.wristTracker.update(quat, null, deltaSeconds);
+    if (res.changed) {
+      active.committed = res.pieceAngle;
+      active.smoothed = res.pieceAngle;
+      this.audio.tick();
+      this.save();
+      this.syncBeam();
+    }
+    return true;
+  }
+
   private hookPress(button: string): boolean {
     const key = button.toLowerCase();
     if (key === 'center' || key === 'recenter') {
@@ -1948,8 +2621,32 @@ export class BoardSystem extends createSystem({
       this.toggleHandMirror(true);
       return true;
     }
+    if (key === 'levels' || key === 'menu') {
+      this.toggleMenu(true);
+      return true;
+    }
+    if (key === 'onehand' || key === 'one-hand' || key === '1-hand') {
+      this.toggleOneHand(true);
+      return true;
+    }
+    if (key === 'daily') {
+      this.selectDailyFromMenu(true);
+      return true;
+    }
+    if (key.startsWith('level-') || key.startsWith('level')) {
+      const numStr = key.replace('level-', '').replace('level', '').trim();
+      const num = parseInt(numStr, 10);
+      if (Number.isInteger(num) && num >= 1 && num <= LEVELS.length) {
+        this.selectLevelFromMenu(num - 1, true);
+        return true;
+      }
+    }
     if (key === 'tutorial' || key === 'next' || key === 'gotit' || key === 'got it') {
       this.advanceTutorial(true);
+      return true;
+    }
+    if (key === 'skip') {
+      this.skipTutorial(true);
       return true;
     }
     if (key === 'resume') {
@@ -1993,14 +2690,40 @@ export class BoardSystem extends createSystem({
     const bottomPieceEdgeY = this.getBottomPieceEdgeY();
     const buttonTopY = roundMm(EDGE_BUTTON_Y + EDGE_BUTTON_HEIGHT / 2);
     const gapM = roundMm(bottomPieceEdgeY - buttonTopY);
+
+    const oneHandObj = {
+      enabled: this.oneHandEnabled,
+      direction: this.oneHandDirection,
+      dwellTime: roundMm(this.pinchDwellTime),
+      valueOf: () => this.oneHandEnabled,
+      [Symbol.toPrimitive]: () => this.oneHandEnabled,
+    };
+
     return {
-      level: this.levelIndex + 1,
+      level: this.isDaily ? 7 : this.levelIndex + 1,
       paused: this.paused,
       inputSettled: this.inputSettled,
       won: this.won,
       lit: this.lit.slice(),
       grabbed: held ? pieceId(held) : null,
+      wrist: this.wristTracker.state(),
+      gaze: {
+        piece: this.gazedPiece ? pieceId(this.gazedPiece) : null,
+        id: this.gazedPiece ? pieceId(this.gazedPiece) : null,
+        angle: this.gazeAngleDeg !== null ? roundMm(this.gazeAngleDeg) : null,
+        angleDeg: this.gazeAngleDeg !== null ? roundMm(this.gazeAngleDeg) : null,
+      },
+      oneHand: oneHandObj,
+      audio: {
+        contextState: this.audio.contextState,
+        lastWinChordAt: this.audio.lastWinChordAt,
+        chordsPlayed: this.audio.chordsPlayed,
+      },
       handMirror: {
+        on: this.handEnabled,
+        intercepting: this.handIntercepting,
+        lockedAngle: this.handLockedAngle,
+        lockedTarget: this.handLockedTarget,
         enabled: this.handEnabled,
         visible: this.handDisc.visible,
       },
@@ -2016,12 +2739,16 @@ export class BoardSystem extends createSystem({
         },
         pausedPanel: this.pausedCard ? this.pausedCard.visible : false,
         endPanel: this.endPanelVisible,
+        menu: this.menuVisible,
       },
       presses: {
         center: this.centerPresses,
         hand: this.handPresses,
+        levels: this.levelsPresses,
+        oneHand: this.oneHandPresses,
         tutorial: this.tutorialPresses,
         next: this.tutorialPresses,
+        skip: this.tutorialSkipPresses,
         resume: this.resumePresses,
         restart: this.restartPresses,
       },
@@ -2038,10 +2765,18 @@ export class BoardSystem extends createSystem({
         buttons: {
           center: this.worldPoint(this.recenterMesh),
           hand: this.worldPoint(this.handMesh),
+          levels: this.worldPoint(this.levelsMesh),
+          oneHand: this.worldPoint(this.oneHandMesh),
           tutorial: this.worldPoint(this.tutorialButtonMesh),
           next: this.worldPoint(this.tutorialButtonMesh),
+          skip: this.worldPoint(this.tutorialSkipButtonMesh),
           resume: this.worldPoint(this.resumeButtonMesh),
           restart: this.worldPoint(this.restartButtonMesh),
+          ...(this.menuDailyMesh ? { daily: this.worldPoint(this.menuDailyMesh) } : {}),
+          ...(this.menuCloseMesh ? { close: this.worldPoint(this.menuCloseMesh) } : {}),
+          ...Object.fromEntries(
+            this.menuLevelMeshes.map((mesh, i) => [`menuLevel${i + 1}`, this.worldPoint(mesh)]),
+          ),
         },
         hands: {
           left: this.headRelative(this.player.gripSpaces.left),

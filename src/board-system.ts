@@ -65,7 +65,6 @@ import { palmOutgoingDegrees } from './beam/palm.js';
 import {
   SNAP_STEP_RADIANS,
   angleFromStepsOrDegrees,
-  chooseTwistDelta,
   nearestSnap,
   signedTwist,
   smoothAngle,
@@ -100,7 +99,7 @@ const HAND_CATCH = 0.08;
 const HAND_RADIUS = 0.03;
 /** A single-frame jump larger than this is a tracking loss, not a wrist. */
 const TRACKING_JUMP = (40 * Math.PI) / 180;
-const TIP_DEAD_ZONE = 0.025;
+const TRACKING_MOVE_JUMP = 0.08;
 const BUTTON_DEBOUNCE_MS = 250;
 const BUTTON_SETTLE_DISTANCE = 0.06;
 const SETTLE_HOLD_TIME = 0.5;
@@ -378,10 +377,11 @@ export class BoardSystem extends createSystem({
   private twisting = false;
   private active: LivePiece | null = null;
   private startAngle = 0;
-  private startTip = 0;
-  private tipReady = false;
   private readonly startGrip: Quat = { x: 0, y: 0, z: 0, w: 1 };
   private readonly gripNow: Quat = { x: 0, y: 0, z: 0, w: 1 };
+  private readonly lastGripQuat: Quat = { x: 0, y: 0, z: 0, w: 1 };
+  private readonly currentGripPos = new Vector3();
+  private readonly lastGripPos = new Vector3();
 
   private paused = false;
   private docHidden = false;
@@ -1305,7 +1305,6 @@ export class BoardSystem extends createSystem({
       this.save();
     }
     this.twisting = false;
-    this.tipReady = false;
     this.active = null;
     this.pinchHeldPiece = null;
     this.pinchHand = null;
@@ -1381,32 +1380,51 @@ export class BoardSystem extends createSystem({
     }
     const { piece, hand } = active;
     this.readBoardAxes();
-    this.readQuat(this.player.gripSpaces[hand], this.gripNow);
-    const tipDelta = this.tipDelta(hand, piece);
+    const grip = this.player.gripSpaces[hand];
+    grip.updateWorldMatrix(true, false);
+    this.readQuat(grip, this.gripNow);
+    this.currentGripPos.setFromMatrixPosition(grip.matrixWorld);
+
     if (!this.twisting || this.active !== piece) {
       this.twisting = true;
       this.active = piece;
       this.startAngle = piece.committed;
       this.copyQuat(this.gripNow, this.startGrip);
+      this.copyQuat(this.gripNow, this.lastGripQuat);
+      this.lastGripPos.copy(this.currentGripPos);
       piece.smoothed = piece.committed;
       return;
     }
-    const gripDelta = signedTwist(this.startGrip, this.gripNow, this.normal);
-    let twist = chooseTwistDelta(tipDelta, gripDelta);
-    if (Math.abs(twist) > TRACKING_JUMP) {
+
+    const posJump = this.currentGripPos.distanceTo(this.lastGripPos) > TRACKING_MOVE_JUMP;
+    const dot = Math.abs(
+      this.lastGripQuat.x * this.gripNow.x +
+      this.lastGripQuat.y * this.gripNow.y +
+      this.lastGripQuat.z * this.gripNow.z +
+      this.lastGripQuat.w * this.gripNow.w,
+    );
+    const frameRot = 2 * Math.acos(Math.min(1, Math.max(-1, dot)));
+    const frameTwist = Math.abs(signedTwist(this.lastGripQuat, this.gripNow, this.normal));
+    const rotJump = frameRot > TRACKING_JUMP || frameTwist > TRACKING_JUMP;
+
+    if (posJump || rotJump) {
       this.startAngle = piece.committed;
-      this.tipReady = false;
       this.copyQuat(this.gripNow, this.startGrip);
       piece.smoothed = piece.committed;
-      twist = 0;
     }
+
+    const twist = signedTwist(this.startGrip, this.gripNow, this.normal);
     piece.smoothed = smoothAngle(piece.smoothed, this.startAngle + twist, delta);
     const next = snapWithHysteresis(piece.smoothed, piece.committed);
-    if (next === piece.committed) return;
-    piece.committed = next;
-    this.audio.tick();
-    this.save();
-    this.syncBeam();
+    if (next !== piece.committed) {
+      piece.committed = next;
+      this.audio.tick();
+      this.save();
+      this.syncBeam();
+    }
+
+    this.lastGripPos.copy(this.currentGripPos);
+    this.copyQuat(this.gripNow, this.lastGripQuat);
   }
 
   private copyQuat(from: Quat, to: Quat): void {
@@ -1422,30 +1440,6 @@ export class BoardSystem extends createSystem({
     this.normal.x = this.scratch.x;
     this.normal.y = this.scratch.y;
     this.normal.z = this.scratch.z;
-  }
-
-  private tipDelta(hand: 'left' | 'right', piece: LivePiece): number {
-    const tip = this.player.indexTipSpaces[hand];
-    tip.updateWorldMatrix(true, false);
-    piece.object.updateWorldMatrix(true, false);
-    this.scratch.setFromMatrixPosition(tip.matrixWorld);
-    this.local.setFromMatrixPosition(piece.object.matrixWorld);
-    this.scratch.sub(this.local);
-    const right = this.xAxis.set(1, 0, 0).transformDirection(this.board.matrixWorld);
-    const up = this.yAxis.set(0, 1, 0).transformDirection(this.board.matrixWorld);
-    const x = this.scratch.dot(right);
-    const y = this.scratch.dot(up);
-    if (Math.hypot(x, y) < TIP_DEAD_ZONE) {
-      this.tipReady = false;
-      return 0;
-    }
-    const angle = Math.atan2(y, x);
-    if (!this.twisting || !this.tipReady) {
-      this.startTip = angle;
-      this.tipReady = true;
-      return 0;
-    }
-    return wrapPi(angle - this.startTip);
   }
 
   private readQuat(object: Object3D, out: Quat): void {
@@ -1545,9 +1539,22 @@ export class BoardSystem extends createSystem({
     return best;
   }
 
+  private isPieceHeld(): boolean {
+    return Boolean(
+      this.active ||
+      this.pinchHeldPiece ||
+      this.hookHeld ||
+      this.grabbedPiece()
+    );
+  }
+
   private integrateWin(delta: number): void {
     if (!this.won || this.tutorialVisible) return;
     this.stepSparks(delta);
+    if (this.isPieceHeld()) {
+      this.winHold = 0;
+      return;
+    }
     if (this.levelIndex >= LEVELS.length - 1 || this.testMode) return;
     // A long first frame must not skip the payoff.
     this.winHold += Math.min(delta, 0.05);

@@ -55,6 +55,7 @@ export const LEVELS: readonly LevelDef[] = [
     source: { col: 0, row: 1, dir: 0 },
     pieces: [
       { type: 'mirror', col: 2, row: 1, rot: 0, movable: true },
+      { type: 'blocker', col: 4, row: 2, rot: 0, movable: false },
       { type: 'mirror', col: 2, row: 3, rot: 0, movable: true },
     ],
     targets: [{ col: 5, row: 3 }],

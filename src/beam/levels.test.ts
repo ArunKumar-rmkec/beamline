@@ -38,3 +38,42 @@ test('the prism level sends two beams away from the prism', () => {
   assert.ok(leaving.length >= 2, 'prism should split');
   assert.equal(result.lit.length, 2);
 });
+
+test('brute-force all snap angle combos for every level and assert winning sets', () => {
+  const SNAP_ANGLES = [0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165];
+
+  function getAngleCombos(pieceCount: number): number[][] {
+    let combos: number[][] = [[]];
+    for (let i = 0; i < pieceCount; i++) {
+      combos = combos.flatMap((c) => SNAP_ANGLES.map((a) => [...c, a]));
+    }
+    return combos;
+  }
+
+  for (const level of LEVELS) {
+    const movable = movablePieces(level);
+    const combos = getAngleCombos(movable.length);
+    const winningCombos: number[][] = [];
+    for (const combo of combos) {
+      const result = solveBeam(boardFromLevel(level, combo));
+      if (result.hitTarget) {
+        winningCombos.push(combo);
+      }
+    }
+
+    const hasListedSolution = winningCombos.some((combo) =>
+      combo.length === level.solution.length &&
+      combo.every((val, i) => val === level.solution[i]),
+    );
+    assert.ok(hasListedSolution, `level ${level.id} listed solution should win`);
+
+    if (level.id === '2') {
+      const wins45_45 = winningCombos.some((c) => c[0] === 45 && c[1] === 45);
+      const wins15_0 = winningCombos.some((c) => c[0] === 15 && c[1] === 0);
+      assert.equal(wins45_45, true, 'level 2 [45, 45] should win');
+      assert.equal(wins15_0, false, 'level 2 [15, 0] should not win');
+    }
+
+    assert.deepEqual(winningCombos, [Array.from(level.solution)], `level ${level.id} winning combos`);
+  }
+});

@@ -58,43 +58,45 @@ function emulateOnlyWithoutNativeXR() {
     transform(code, id) {
       if (!id.includes('iwer-injection') || !code.includes(marker)) return null;
       if (code.includes('beamlineLacksNativeImmersiveXR')) return null;
-      const call = splitCall(code, marker);
+      const importRegex = /import\s*\{\s*startIwsdkDevRuntime\s*\}\s*from\s*(['"][^'"]+['"])\s*;?\r?\n?/;
+      const importMatch = code.match(importRegex);
+      const runtimeSpecifier = importMatch ? importMatch[1] : "'virtual:iwsdk-dev-runtime/runtime.js'";
+      const cleanedCode = importMatch ? code.replace(importMatch[0], '') : code;
+      const call = splitCall(cleanedCode, marker);
       if (call == null) return null;
-      const trailingSemicolon = code[call.end] === ';' ? 1 : 0;
+      const trailingSemicolon = cleanedCode[call.end] === ';' ? 1 : 0;
       const wrapped = `async function beamlineLacksNativeImmersiveXR() {
   const xr = navigator.xr;
   if (xr == null || typeof xr.isSessionSupported !== 'function') return true;
-  const supported = (mode) => {
-    try {
-      return Promise.resolve(xr.isSessionSupported(mode)).then(
-        (value) => value === true,
-        () => false,
-      );
-    } catch {
-      return Promise.resolve(false);
-    }
-  };
+  let timer;
   try {
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('timeout')), 2000);
+    });
     const [ar, vr] = await Promise.race([
-      Promise.all([supported('immersive-ar'), supported('immersive-vr')]),
-      new Promise((resolve) => {
-        setTimeout(() => resolve([false, false]), 2000);
-      }),
+      Promise.all([
+        Promise.resolve(xr.isSessionSupported('immersive-ar')),
+        Promise.resolve(xr.isSessionSupported('immersive-vr')),
+      ]),
+      timeout,
     ]);
-    return ar !== true && vr !== true;
+    return ar === false && vr === false;
   } catch {
-    return true;
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 if (await beamlineLacksNativeImmersiveXR()) {
+  const { startIwsdkDevRuntime } = await import(${runtimeSpecifier});
   startIwsdkDevRuntime(${call.arg});
 }
 `;
       return {
         code:
-          code.slice(0, call.start) +
+          cleanedCode.slice(0, call.start) +
           wrapped +
-          code.slice(call.end + trailingSemicolon),
+          cleanedCode.slice(call.end + trailingSemicolon),
         map: null,
       };
     },

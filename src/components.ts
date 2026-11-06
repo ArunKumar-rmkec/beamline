@@ -14,6 +14,20 @@ export const HandMirrorButton = createComponent(
   'Poke target that turns the palm reflector on or off',
 );
 
+/** Marks the board-edge poke target that opens or closes the level select menu. */
+export const LevelsButton = createComponent(
+  'LevelsButton',
+  {},
+  'Poke target that opens or closes the level select menu',
+);
+
+/** Marks the board-edge poke target that toggles one-hand mode. */
+export const OneHandButton = createComponent(
+  'OneHandButton',
+  {},
+  'Poke target that toggles one-hand mode',
+);
+
 /** Marks the poke target on the first-run tutorial panel. */
 export const TutorialButton = createComponent(
   'TutorialButton',
@@ -35,10 +49,36 @@ export const RestartButton = createComponent(
   'Poke target that restarts the game from the end screen',
 );
 
+/** Marks a level choice poke target in the level menu. */
+export const LevelChoiceButton = createComponent(
+  'LevelChoiceButton',
+  {},
+  'Poke target that loads a specific level from the menu',
+);
+
+/** Marks the daily puzzle poke target in the level menu. */
+export const DailyChoiceButton = createComponent(
+  'DailyChoiceButton',
+  {},
+  'Poke target that loads the daily puzzle from the menu',
+);
+
+/** Marks the close button in the level menu. */
+export const CloseMenuButton = createComponent(
+  'CloseMenuButton',
+  {},
+  'Poke target that closes the level menu',
+);
+
 export default defineComponents([
   RecenterButton,
   HandMirrorButton,
+  LevelsButton,
+  OneHandButton,
   TutorialButton,
   ResumeButton,
   RestartButton,
+  LevelChoiceButton,
+  DailyChoiceButton,
+  CloseMenuButton,
 ]);

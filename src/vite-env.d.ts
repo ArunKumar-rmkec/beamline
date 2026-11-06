@@ -25,7 +25,30 @@ interface BeamlineTestApi {
     won: boolean;
     lit: boolean[];
     grabbed: string | null;
-    handMirror?: { enabled: boolean; visible: boolean };
+    gaze?: {
+      piece: string | null;
+      id?: string | null;
+      angle: number | null;
+      angleDeg?: number | null;
+    };
+    oneHand?: {
+      enabled: boolean;
+      direction: number;
+      dwellTime?: number;
+    };
+    audio?: {
+      contextState: AudioContextState | 'uninitialized';
+      lastWinChordAt: number;
+      chordsPlayed: number;
+    };
+    handMirror?: {
+      on: boolean;
+      intercepting: boolean;
+      lockedAngle: number | null;
+      lockedTarget: number | null;
+      enabled?: boolean;
+      visible?: boolean;
+    };
     layout?: {
       bottomPieceEdgeY: number;
       buttonTopY: number;
@@ -35,10 +58,13 @@ interface BeamlineTestApi {
       tutorial: { visible: boolean; step: number };
       pausedPanel: boolean;
       endPanel: boolean;
+      menu?: boolean;
     };
     presses: {
       center: number;
       hand: number;
+      levels?: number;
+      oneHand?: number;
       tutorial: number;
       next?: number;
       resume: number;
@@ -51,6 +77,8 @@ interface BeamlineTestApi {
       buttons: {
         center: BeamlinePosePoint;
         hand: BeamlinePosePoint;
+        levels?: BeamlinePosePoint;
+        oneHand?: BeamlinePosePoint;
         tutorial: BeamlinePosePoint;
         next?: BeamlinePosePoint;
         resume: BeamlinePosePoint;
@@ -71,6 +99,10 @@ interface BeamlineTestApi {
   resume(): void;
   resetTutorial(): void;
   press?(button: string): boolean;
+  menu?(open?: boolean): boolean;
+  daily?(dateStr?: string): boolean;
+  oneHand?(on?: boolean): boolean;
+  palm?(x?: number | null, y?: number): boolean;
 }
 
 interface Window {
